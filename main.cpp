@@ -14,8 +14,8 @@ namespace Version
 {
     inline constexpr std::size_t MAJOR = 0;
     inline constexpr std::size_t MINOR = 0;
-    inline constexpr std::size_t PATCH = 1;
-    inline constexpr auto NAME = "0.0.1"sv;
+    inline constexpr std::size_t PATCH = 4;
+    inline constexpr auto NAME = "0.0.4"sv;
     inline constexpr auto AUTHORNAME = "disi"sv;
     inline constexpr auto PROJECT = "GFXBoosterCL"sv;
 } // namespace Version
@@ -49,6 +49,8 @@ bool DEBUGGING = false;
 bool CUSTOMBUFFER_ON = true;
 // Custom resource view slot in shader
 UINT CUSTOMBUFFER_SLOT = 14;
+// Shader folder path for loading custom shaders and watching for changes in development mode
+std::filesystem::path g_shaderFolderPath;
 // Global Development features flag (like dumping shaders, extra logging, etc)
 bool DEVELOPMENT = false;
 // Development GUI flag
@@ -238,6 +240,18 @@ int LoadShaderDefinitionsFromFile(const std::filesystem::path& shaderFolderPath,
                             def.hash.push_back(ParseHexFormID(segment));
                         } catch (...) {
                             REX::WARN("LoadShaderDefinitionsFromFile: Invalid hash for {}: {}", shaderId, segment);
+                        }
+                    }
+                }
+                // Default to 0
+                else if (lowerKey == "asmhash") {
+                    std::stringstream ss(value);
+                    std::string segment;
+                    while (std::getline(ss, segment, ',')) {
+                        try {
+                            def.asmHash.push_back(ParseHexFormID(segment));
+                        } catch (...) {
+                            REX::WARN("LoadShaderDefinitionsFromFile: Invalid asmHash for {}: {}", shaderId, segment);
                         }
                     }
                 }
@@ -481,6 +495,7 @@ int LoadShaderDefinitionsFromFile(const std::filesystem::path& shaderFolderPath,
 // Load config and shader definitions from INI file
 void LoadConfig(HMODULE hModule) {
     std::filesystem::path configPath = GetPluginDirectory(hModule) / g_iniName;
+    g_pluginPath = configPath.parent_path();
     std::string configPathStr = configPath.string();
     REX::INFO("LoadConfig: Loading config from: {}", configPathStr);
     std::ifstream file(configPathStr, std::ios::in);
@@ -565,9 +580,11 @@ void LoadConfig(HMODULE hModule) {
     }
     file.close();
     // Scan for shader definitions in subdirectories
-    std::filesystem::path shaderBasePath = std::filesystem::path(g_pluginPath) / "GFXBooster";
-    REX::INFO("LoadConfig: Scanning for shaders in: {}", shaderBasePath.string());
-    auto shaderFolders = GetSubdirectories(shaderBasePath);
+    if (g_shaderFolderPath.empty()) {
+        g_shaderFolderPath = configPath.parent_path() / "GFXBooster";
+    }
+    REX::INFO("LoadConfig: Scanning for shaders in: {}", g_shaderFolderPath.string());
+    auto shaderFolders = GetSubdirectories(g_shaderFolderPath);
     REX::INFO("LoadConfig: Found {} shader folder(s)", shaderFolders.size());
     int totalDefinitions = 0;
     for (const auto& folderPath : shaderFolders) {
@@ -581,7 +598,7 @@ void LoadConfig(HMODULE hModule) {
     REX::INFO("LoadConfig: Completed. Loaded {} shader definition(s) total", totalDefinitions);
     // Add HlslFileWatcher for shaderBasePath to automatically reload shader definitions on changes
     if (DEVELOPMENT) {
-        REX::INFO("LoadConfig: Setting up development file watcher for shader definitions in: {}", shaderBasePath.string());
+        REX::INFO("LoadConfig: Setting up development file watcher for shader definitions in: {}", g_shaderFolderPath.string());
         for (auto* def : g_shaderDefinitions.definitions) {
             if (def->active && !def->shaderFile.empty()) {
                 def->hlslFileWatcher = std::make_unique<HlslFileWatcher>(def->shaderFile, def);
@@ -591,10 +608,10 @@ void LoadConfig(HMODULE hModule) {
     }
     // Set global shader include path for D3DCompile calls
     try {
-    g_commonShaderHeaderPath = std::filesystem::canonical(g_pluginPath) / "GFXBooster" / "Include";
+    g_commonShaderHeaderPath = g_shaderFolderPath / "Include";
     } catch (...) {
         // Fallback if canonical fails
-        g_commonShaderHeaderPath = std::filesystem::absolute(g_pluginPath) / "Plugins" / "GFXBooster" / "Include";
+        g_commonShaderHeaderPath = configPath.parent_path() / "Plugins" / "GFXBooster" / "Include";
     }
     if (DEBUGGING) {
         REX::INFO("LoadConfig: Setting global shader include path for D3DCompile to: {}", g_commonShaderHeaderPath.string());
@@ -619,8 +636,10 @@ void ReloadAllShaderDefinitions_Internal() {
     // At this point we have no active watchers and no connections between ShaderDB and ShaderDefDB
     g_shaderDefinitions.Clear();  // Deletes old definitions
     // Build a new ShaderDefDB from the INI files on disk
-    std::filesystem::path shaderBasePath = g_pluginPath / "GFXBooster";
-    auto shaderFolders = GetSubdirectories(shaderBasePath);
+    if (g_shaderFolderPath.empty()) {
+        g_shaderFolderPath = g_pluginPath / "GFXBooster";
+    }
+    auto shaderFolders = GetSubdirectories(g_shaderFolderPath);
     for (const auto& folderPath : shaderFolders) {
         std::string folderName = folderPath.filename().string();
         LoadShaderDefinitionsFromFile(folderPath, folderName);  // Loads into g_shaderDefinitions

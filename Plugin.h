@@ -37,6 +37,7 @@ struct ShaderDefinition {
     // Matching criteria
     ShaderType type = ShaderType::Pixel;
     std::vector<std::uint32_t> hash = {};
+    std::vector<std::uint32_t> asmHash = {};
     std::vector<SizeRequirement> sizeRequirements;
     std::vector<std::pair<int, int>> bufferSizes;
     std::vector<int> textureSlots;
@@ -75,6 +76,7 @@ struct ShaderDBEntry {
         : originalShader(other.originalShader)
         , type(other.type)
         , hash(other.hash)
+        , asmHash(other.asmHash)
         , size(other.size)
         , textureSlots(std::move(other.textureSlots))
         , textureDimensions(std::move(other.textureDimensions))
@@ -103,6 +105,7 @@ struct ShaderDBEntry {
             other.originalShader = nullptr; // Prevent dangling pointer
             type = other.type;
             hash = other.hash;
+            asmHash = other.asmHash;
             size = other.size;
             textureSlots = std::move(other.textureSlots);
             textureDimensions = std::move(other.textureDimensions);
@@ -131,6 +134,7 @@ struct ShaderDBEntry {
     // Matching criteria
     ShaderType type = ShaderType::Pixel;
     std::uint32_t hash = 0;
+    std::uint32_t asmHash = 0;
     std::size_t size = 0;
     std::uint32_t expectedCBSizes[14] = {0};
     std::vector<int> textureSlots = {};
@@ -393,7 +397,9 @@ struct alignas(16) GFXBoosterAccessData
     DirectX::XMFLOAT4 g_InvProjRow3; // 27
 
     float random;    // 28
-    float _padding[3]; // Pad to 16 bytes
+    float  inCombat;     // 29
+    float  inInterior;   // 30
+    float _padding;   // pad the remainder of the 16‑byte slot
 };
 
 // --- Functions ---

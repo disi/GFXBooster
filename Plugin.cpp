@@ -14,8 +14,6 @@ ShaderDB g_ShaderDB = {};
 int g_currentTextureDSIndices[128] = { -1 }; 
 // Tell MyCreatePixelShader to skip analysing the shader when creating replacement shaders to avoid infinite recursion
 bool g_isCreatingReplacementShader = false;
-// Tell MyPSSetShaderResources to skip setting the SRV when creating replacement shaders to avoid infinite recursion
-bool g_isSettingResourcesForReplacementShader = false;
 // Global custom buffer data structure instance for updating CB13
 GFXBoosterAccessData g_customBufferData = {};
 // Global custom resource to pass data to shaders
@@ -33,6 +31,10 @@ static float    g_radDmg = 0.0f;    // calculated value send to the shader
 static float    g_windSpeed = 0.0f;     // value sampled 30 frames ago
 static float    g_windAngle = 0.0f;     // value sampled 30 frames ago
 static float    g_windTurbulence = 0.0f;// value sampled 30 frames ago
+// Global combat flag
+static bool     g_inCombat = false;    // value sampled 30 frames ago
+// Global interior flag
+static bool     g_inInterior = false; // value sampled 30 frames ago
 // UI: Compiler neon flash shader pointer
 REX::W32::ID3D11PixelShader* g_flashPixelShader = nullptr;
 // UI: Imgui WndProc hook variables
@@ -101,7 +103,9 @@ void STDMETHODCALLTYPE MyPSSetShader(
                 }
                 pPixelShader = replacementPixelShader;
                 // Set our custom SRV for replacement shaders to use in their shader code
-                This->PSSetShaderResources(CUSTOMBUFFER_SLOT, 1, &g_customSRV);
+                if (g_customSRV) {
+                    This->PSSetShaderResources(CUSTOMBUFFER_SLOT, 1, &g_customSRV);
+                }
             } else {
                 auto* matchedDefinition = g_ShaderDB.GetMatchedDefinition(pPixelShader);
                 if (matchedDefinition && !matchedDefinition->buggy) {
@@ -117,7 +121,9 @@ void STDMETHODCALLTYPE MyPSSetShader(
                         }
                         pPixelShader = g_ShaderDB.GetReplacementShader(pPixelShader);
                         // Set our custom SRV for replacement shaders to use in their shader code
-                        This->PSSetShaderResources(CUSTOMBUFFER_SLOT, 1, &g_customSRV);
+                        if (g_customSRV) {
+                            This->PSSetShaderResources(CUSTOMBUFFER_SLOT, 1, &g_customSRV);
+                        }
                     } else {
                         REX::WARN("MyPSSetShader: Failed to compile replacement shader for definition '{}'", matchedDefinition->id);
                         matchedDefinition->buggy = true; // Mark as failed to compile
@@ -156,7 +162,9 @@ void STDMETHODCALLTYPE MyVSSetShader(
                 }
                 pVertexShader = replacementVertexShader;
                 // Set our custom SRV for replacement shaders to use in their shader code
-                This->VSSetShaderResources(CUSTOMBUFFER_SLOT, 1, &g_customSRV);
+                if (g_customSRV) {
+                    This->VSSetShaderResources(CUSTOMBUFFER_SLOT, 1, &g_customSRV);
+                }
             } else {
                 auto* matchedDefinition = g_ShaderDB.GetMatchedDefinition(pVertexShader);
                 if (matchedDefinition && !matchedDefinition->buggy) {
@@ -172,7 +180,9 @@ void STDMETHODCALLTYPE MyVSSetShader(
                         }
                         pVertexShader = g_ShaderDB.GetReplacementShader(pVertexShader);
                         // Set our custom SRV for replacement shaders to use in their shader code
-                        This->VSSetShaderResources(CUSTOMBUFFER_SLOT, 1, &g_customSRV);
+                        if (g_customSRV) {
+                            This->VSSetShaderResources(CUSTOMBUFFER_SLOT, 1, &g_customSRV);
+                        }
                     } else {
                         REX::WARN("MyVSSetShader: Failed to compile replacement shader for definition '{}'", matchedDefinition->id);
                         matchedDefinition->buggy = true; // Mark as failed to compile
@@ -306,6 +316,7 @@ ShaderDBEntry AnalyzeShader_Internal(REX::W32::ID3D11PixelShader* pixelShader, R
             if (DEVELOPMENT && def->log) {
                 REX::INFO("AnalyzeShader_Internal: ------------------------------------------------");
                 REX::INFO("AnalyzeShader_Internal: Found matching shader definition '{}' for {} shader with hash {:08X} and size {} bytes.", def->id, entry.type == ShaderType::Vertex ? "Vertex" : "Pixel", hash, entry.size);
+                REX::INFO(" - Shader ASM Hash: {:08X}", entry.asmHash);
                 REX::INFO(" - Shader CB Sizes: {},{},{},{},{},{},{},{},{},{},{},{},{},{}", 
                     entry.expectedCBSizes[0], entry.expectedCBSizes[1], entry.expectedCBSizes[2], entry.expectedCBSizes[3],
                     entry.expectedCBSizes[4], entry.expectedCBSizes[5], entry.expectedCBSizes[6], entry.expectedCBSizes[7],
@@ -343,7 +354,8 @@ bool CompileShader_Internal(ShaderDefinition* def) {
     if (!def) return false;
     // Check if already compiled
     if (def->loadedPixelShader || def->loadedVertexShader) {
-        REX::WARN("CompileShader_Internal: Shader '{}' is already compiled. Skipping compilation.", def->id);
+        if (DEBUGGING)
+            REX::INFO("CompileShader_Internal: Shader '{}' is already compiled. Skipping compilation.", def->id);
         return true;
     }
     // Check the file exists
@@ -452,6 +464,19 @@ bool DoesEntryMatchDefinition_Internal(ShaderDBEntry const& entry, ShaderDefinit
             return false;
         }
     }
+    // Check ASM hash if specified
+    if (def->asmHash.size() != 0) {
+        bool asmHashMatch = false;
+        for (const auto& asmHash : def->asmHash) {
+            if (entry.asmHash == asmHash) {
+                asmHashMatch = true;
+                break;
+            }
+        }
+        if (!asmHashMatch) {
+            return false;
+        }
+    }
     // Check size requirement if specified
     if (!def->sizeRequirements.empty()) {
         for (const auto& req : def->sizeRequirements) {
@@ -526,6 +551,7 @@ void DumpOriginalShader_Internal(ShaderDBEntry const& entry, ShaderDefinition* d
         // Capture entry and def by value to ensure they remain valid in the task
         g_taskInterface->AddTask([type=entry.type,
                                   hash=entry.hash,
+                                  asmHash=entry.asmHash,
                                   size=entry.size,
                                   bytecode=entry.bytecode,
                                   expectedCBSizes=[&entry]() { 
@@ -578,6 +604,7 @@ void DumpOriginalShader_Internal(ShaderDBEntry const& entry, ShaderDefinition* d
                 logFile << "priority=0" << std::endl;
                 logFile << "type=" << (type == ShaderType::Pixel ? "ps" : "vs") << std::endl;
                 logFile << "hash=0x" << std::hex << std::uppercase << hash << std::dec << std::endl;
+                logFile << "asmHash=0x" << std::hex << std::uppercase << asmHash << std::dec << std::endl;
                 // Size as exact match in parentheses
                 logFile << "size=(" << size << ")" << std::endl;
                 // Buffer sizes in format: size@slot,size@slot
@@ -668,6 +695,13 @@ bool ReflectShader_Internal(ShaderDBEntry& entry) {
     std::string disasmStr(static_cast<const char*>(disassembly->GetBufferPointer()), disassembly->GetBufferSize());
     // Define regexes as static once
     static const auto regexFlags = std::regex_constants::optimize | std::regex_constants::icase;
+    // Catch instructions – only real opcodes, anchored at line start
+    static std::regex instrRegex(
+        R"(^\s*(add|sub|mul|div|mad|max|min|dp2|dp3|dp4|rsq|sqrt|"
+        "and|or|xor|not|lt|gt|le|ge|eq|ne|"
+        "mov(?:c|_sat)?|sample(?:_indexable)?|"
+        "loop|endloop|if|else|endif|break(?:c)?|ret)\b)",
+        regexFlags);
     // Catch t# registers
     static std::regex texRegex(R"(dcl_resource_(\w+)\s*(?:\([^)]*\))?\s*(?:\([^)]+\))?\s+t(\d+))", regexFlags);
     // Catch v# registers (broad match for any dcl_input flavor)
@@ -680,6 +714,7 @@ bool ReflectShader_Internal(ShaderDBEntry& entry) {
     std::istringstream iss(disasmStr);
     std::string line;
     // Clear the buffers before filling them in case this is called multiple times for the same entry (e.g., if we analyze both pixel and vertex shader for the same entry)
+    entry.asmHash = 0;
     entry.textureSlots.clear();
     entry.textureDimensions.clear();
     entry.textureSlotMask = 0;
@@ -691,10 +726,16 @@ bool ReflectShader_Internal(ShaderDBEntry& entry) {
     for (int i = 0; i < 14; ++i) entry.expectedCBSizes[i] = 0;
     entry.outputCount = 0;
     entry.outputMask = 0;
+    std::string asmConcat;
     int inputTextureCount = 0;
     int inputCount = 0;
     int outputCount = 0;
     while (std::getline(iss, line)) {
+        // Look for instructions to get a rough idea of shader complexity
+        std::smatch match;
+        if (std::regex_search(line, match, instrRegex)) {
+            asmConcat += match[1].str() + ";"; // Add the opcode to a concatenated string for hashing
+        }
         // Look for texture declarations to detect texture slots and dimensions (mainly pixel shaders)
         // Example: "dcl_resource_texture2d (float,float,float,float) t0"
         // Dimensions from d3dcommon.h
@@ -708,7 +749,6 @@ bool ReflectShader_Internal(ShaderDBEntry& entry) {
         // D3D11_SRV_DIMENSION_TEXTURE1DARRAY = 4
         // D3D11_SRV_DIMENSION_TEXTURE2DARRAY = 5
         // D3D11_SRV_DIMENSION_TEXTURECUBEARRAY = 11
-        std::smatch match;
         // Texture / Resource declaration parsing (mainly pixel shaders)
         if (std::regex_search(line, match, texRegex)) {
             std::string texType = match[1];      // "texture1d"
@@ -761,6 +801,7 @@ bool ReflectShader_Internal(ShaderDBEntry& entry) {
     }
     // Clean up
     disassembly->Release();
+    entry.asmHash = static_cast<std::uint32_t>(std::hash<std::string_view>{}(asmConcat));
     entry.inputTextureCount = inputTextureCount;
     entry.inputCount = inputCount;
     entry.outputCount = outputCount;
@@ -794,6 +835,7 @@ void RematchAllShaders_Internal() {
                 if (DEVELOPMENT && def->log) {
                     REX::INFO("RematchAllShaders_Internal: ------------------------------------------------");
                     REX::INFO("RematchAllShaders_Internal: Found matching shader definition '{}' for {} shader with hash {:08X} and size {} bytes.", def->id, entry.type == ShaderType::Vertex ? "Vertex" : "Pixel", entry.hash, entry.size);
+                    REX::INFO("RematchAllShaders_Internal: Shader ASM Hash: {:08X}", entry.asmHash);
                     REX::INFO(" - Shader CB Sizes: {},{},{},{},{},{},{},{},{},{},{},{},{},{}", 
                         entry.expectedCBSizes[0], entry.expectedCBSizes[1], entry.expectedCBSizes[2], entry.expectedCBSizes[3],
                         entry.expectedCBSizes[4], entry.expectedCBSizes[5], entry.expectedCBSizes[6], entry.expectedCBSizes[7],
@@ -1070,6 +1112,13 @@ void UpdateCustomBuffer_Internal() {
             g_windAngle = g_sky->windAngle;
             g_windTurbulence = g_sky->windTurbulence;
         }
+        // Check if the player is in combat
+        if (g_player)
+            g_inCombat = g_player->IsInCombat();
+        // Check if the current Cell is an interior or exterior for sky-related shader effects
+        if (g_player && g_player->GetParentCell()) {
+            g_inInterior = g_player->GetParentCell()->IsInterior();
+        }
     }
     // Get the Projection Inverse matrix to extract the camera FOV
     auto& PM = camView.projMat; // __m128 projMat[4]
@@ -1107,6 +1156,8 @@ void UpdateCustomBuffer_Internal() {
     DirectX::XMStoreFloat4(&g_customBufferData.g_InvProjRow2, invProj.r[2]);
     DirectX::XMStoreFloat4(&g_customBufferData.g_InvProjRow3, invProj.r[3]);
     g_customBufferData.random  = randomValue;
+    g_customBufferData.inCombat = g_inCombat ? 1.0f : 0.0f;
+    g_customBufferData.inInterior = g_inInterior ? 1.0f : 0.0f;
     // Create or update our custom buffer resource view with the new data
     if (!g_rendererData) {
         g_rendererData = RE::BSGraphics::GetRendererData();
