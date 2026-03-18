@@ -50,6 +50,8 @@ static bool g_shaderListLocked = false;
 static std::vector<void*> g_lockedShaderKeys; // snapshot of map keys (original shader pointer)
 // UI: show/hide replaced shaders in the list
 static bool g_showReplaced = true; // default enabled
+// UI: show/hide settings menu
+static bool g_showSettings = true; // default enabled
 
 // --- Hooks ---
 
@@ -66,11 +68,27 @@ HRESULT STDMETHODCALLTYPE MyPresent(
     if (CUSTOMBUFFER_ON) {
         UpdateCustomBuffer_Internal();  // Update CB13
     }
-    if (DEVGUI_ON && g_imguiInitialized) {
+    // Always draw a frame if ImGui is initialized to allow hotkeys
+    if (g_imguiInitialized) {
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
-        UIDrawShaderDebugOverlay();  // Just the UI drawing
+    }
+    // Show/hide settings menu with END key
+    if (g_imguiInitialized && ImGui::IsKeyPressed(ImGuiKey_End)) {
+        g_showSettings = !g_showSettings;
+    }
+    // Save settings with HOME key
+    if (g_imguiInitialized && g_showSettings && ImGui::IsKeyPressed(ImGuiKey_Home)) {
+        g_shaderSettings.SaveSettings();
+    }
+    if (g_imguiInitialized && SHADERSETTINGS_ON && g_showSettings) {
+        UIDrawShaderSettingsOverlay();
+    }
+    if (g_imguiInitialized && DEVGUI_ON && g_showSettings) {
+        UIDrawShaderDebugOverlay();
+    }
+    if (g_imguiInitialized) {
         ImGui::Render();
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     }
@@ -315,8 +333,10 @@ ShaderDBEntry AnalyzeShader_Internal(REX::W32::ID3D11PixelShader* pixelShader, R
             entry.matchedDefinition = def; // Store the matched definition for later use during shader compilation
             if (DEVELOPMENT && def->log) {
                 REX::INFO("AnalyzeShader_Internal: ------------------------------------------------");
-                REX::INFO("AnalyzeShader_Internal: Found matching shader definition '{}' for {} shader with hash {:08X} and size {} bytes.", def->id, entry.type == ShaderType::Vertex ? "Vertex" : "Pixel", hash, entry.size);
-                REX::INFO(" - Shader ASM Hash: {:08X}", entry.asmHash);
+                    REX::INFO("RematchAllShaders_Internal: Found matching shader definition '{}' for {} shader with ShaderUID '{}'.", def->id, entry.type == ShaderType::Vertex ? "Vertex" : "Pixel", entry.shaderUID);
+                    REX::INFO("RematchAllShaders_Internal: Shader Hash: {:08X}", entry.hash);
+                    REX::INFO("RematchAllShaders_Internal: Shader Size: {} bytes", entry.size);
+                    REX::INFO("RematchAllShaders_Internal: Shader ASM Hash: {:08X}", entry.asmHash);
                 REX::INFO(" - Shader CB Sizes: {},{},{},{},{},{},{},{},{},{},{},{},{},{}", 
                     entry.expectedCBSizes[0], entry.expectedCBSizes[1], entry.expectedCBSizes[2], entry.expectedCBSizes[3],
                     entry.expectedCBSizes[4], entry.expectedCBSizes[5], entry.expectedCBSizes[6], entry.expectedCBSizes[7],
@@ -364,8 +384,27 @@ bool CompileShader_Internal(ShaderDefinition* def) {
         REX::WARN("CompileShader_Internal: Shader file not found: {}", def->shaderFile.string());
         return false;
     }
-    // Compile the shader source code
-    std::string shaderSource((std::istreambuf_iterator<char>(shaderFile)), std::istreambuf_iterator<char>());
+    // Build the common shader header with dynamic shader settings values injected as defines
+    std::string shaderHeader = GetCommonShaderHeaderHLSLTop();
+    // Struct is already closed in commonShaderHeaderHLSLTop with fixed-size arrays.
+    // Add the bottom (declares GFXInjected) before the #defines that reference it.
+    shaderHeader += GetCommonShaderHeaderHLSLBottom();
+    // Inject #define named accessors — each maps a friendly name to the correct array slot.
+    // bufferIndex is the global insertion order, so it always matches the C++ byte offset.
+    shaderHeader += "// shader settings — named accessors\n";
+    for (auto* sValue : g_shaderSettings.GetFloatShaderValues()) {
+        shaderHeader += std::format("#define {} GFXInjected[0].modularFloats[{}]\n", sValue->id, sValue->bufferIndex);
+    }
+    for (auto* sValue : g_shaderSettings.GetIntShaderValues()) {
+        shaderHeader += std::format("#define {} GFXInjected[0].modularInts[{}]\n", sValue->id, sValue->bufferIndex);
+    }
+    for (auto* sValue : g_shaderSettings.GetBoolShaderValues()) {
+        shaderHeader += std::format("#define {} (GFXInjected[0].modularBools[{}] != 0)\n", sValue->id, sValue->bufferIndex);
+    }
+    shaderHeader += "\n";
+    // Read the shader source from file and prepend the common header
+    std::string shaderSource = shaderHeader;
+    shaderSource += std::string((std::istreambuf_iterator<char>(shaderFile)), std::istreambuf_iterator<char>());
     shaderFile.close();
     std::string targetProfile = "ps_5_0"; // Default to pixel shader model 5.0
     if (def->type == ShaderType::Vertex) {
@@ -451,6 +490,19 @@ bool DoesEntryMatchDefinition_Internal(ShaderDBEntry const& entry, ShaderDefinit
     // Check shader type
     if (def->type == ShaderType::Pixel && entry.type != ShaderType::Pixel) return false;
     if (def->type == ShaderType::Vertex && entry.type != ShaderType::Vertex) return false;
+    // Check ShaderUID[s] if specified
+    if (!def->shaderUID.empty()) {
+        bool uidMatch = false;
+        for (const auto& uid : def->shaderUID) {
+            if (ToLower(entry.shaderUID) == ToLower(uid)) {
+                uidMatch = true;
+                break;
+            }
+        }
+        if (!uidMatch) {
+            return false;
+        }
+    }
     // Check hash[es] if specified
     if (def->hash.size() != 0) {
         bool hashMatch = false;
@@ -550,6 +602,7 @@ void DumpOriginalShader_Internal(ShaderDBEntry const& entry, ShaderDefinition* d
     if (g_taskInterface) {
         // Capture entry and def by value to ensure they remain valid in the task
         g_taskInterface->AddTask([type=entry.type,
+                                  shaderUID=entry.shaderUID,
                                   hash=entry.hash,
                                   asmHash=entry.asmHash,
                                   size=entry.size,
@@ -572,9 +625,9 @@ void DumpOriginalShader_Internal(ShaderDBEntry const& entry, ShaderDefinition* d
             std::filesystem::path dumpPath = g_pluginPath / "GFXBoosterDumps" / def->id;
             std::filesystem::create_directories(dumpPath);
             if (def->dump && !bytecode.empty()) {
-                std::string binFilename = std::format("{:08X}_original_{}_shader_{}_.bin", hash, (type == ShaderType::Pixel ? "ps" : "vs"), def->id);
-                std::string asmFilename = std::format("{:08X}_original_{}_shader_{}_.asm", hash, (type == ShaderType::Pixel ? "ps" : "vs"), def->id);
-                std::string logFilename = std::format("{:08X}_original_{}_shader_{}_.txt", hash, (type == ShaderType::Pixel ? "ps" : "vs"), def->id);
+                std::string binFilename = std::format("{}.bin", shaderUID);
+                std::string asmFilename = std::format("{}.asm", shaderUID);
+                std::string logFilename = std::format("{}.txt", shaderUID);
                 std::filesystem::path binPath = dumpPath / binFilename;
                 std::filesystem::path asmPath = dumpPath / asmFilename;
                 std::filesystem::path logPath = dumpPath / logFilename;
@@ -603,6 +656,7 @@ void DumpOriginalShader_Internal(ShaderDBEntry const& entry, ShaderDefinition* d
                 logFile << "active=true" << std::endl;
                 logFile << "priority=0" << std::endl;
                 logFile << "type=" << (type == ShaderType::Pixel ? "ps" : "vs") << std::endl;
+                logFile << "shaderUID=" << shaderUID << std::endl;
                 logFile << "hash=0x" << std::hex << std::uppercase << hash << std::dec << std::endl;
                 logFile << "asmHash=0x" << std::hex << std::uppercase << asmHash << std::dec << std::endl;
                 // Size as exact match in parentheses
@@ -650,7 +704,7 @@ void DumpOriginalShader_Internal(ShaderDBEntry const& entry, ShaderDefinition* d
                 logFile << "outputcount=(" << outputCount << ")" << std::endl;
                 logFile << "outputMask=0x" << std::hex << std::uppercase << outputMask << std::dec << std::endl;
                 // Shader file (empty, user needs to add)
-                logFile << "shader=;" << hash << "_replacement.hlsl" << std::endl;
+                logFile << "shader=;" << shaderUID << "_replacement.hlsl" << std::endl;
                 logFile << "log=true" << std::endl;
                 logFile << "dump=true" << std::endl;
                 // Close section
@@ -714,6 +768,7 @@ bool ReflectShader_Internal(ShaderDBEntry& entry) {
     std::istringstream iss(disasmStr);
     std::string line;
     // Clear the buffers before filling them in case this is called multiple times for the same entry (e.g., if we analyze both pixel and vertex shader for the same entry)
+    entry.shaderUID = "";
     entry.asmHash = 0;
     entry.textureSlots.clear();
     entry.textureDimensions.clear();
@@ -805,6 +860,11 @@ bool ReflectShader_Internal(ShaderDBEntry& entry) {
     entry.inputTextureCount = inputTextureCount;
     entry.inputCount = inputCount;
     entry.outputCount = outputCount;
+    entry.shaderUID = std::format("{}{:08X}I{}O{}",
+        entry.type == ShaderType::Pixel ? "PS" : "VS",
+        entry.asmHash,
+        entry.inputCount,
+        entry.outputCount);
     return true;
 }
 
@@ -834,7 +894,9 @@ void RematchAllShaders_Internal() {
                 }
                 if (DEVELOPMENT && def->log) {
                     REX::INFO("RematchAllShaders_Internal: ------------------------------------------------");
-                    REX::INFO("RematchAllShaders_Internal: Found matching shader definition '{}' for {} shader with hash {:08X} and size {} bytes.", def->id, entry.type == ShaderType::Vertex ? "Vertex" : "Pixel", entry.hash, entry.size);
+                    REX::INFO("RematchAllShaders_Internal: Found matching shader definition '{}' for {} shader with ShaderUID '{}'.", def->id, entry.type == ShaderType::Vertex ? "Vertex" : "Pixel", entry.shaderUID);
+                    REX::INFO("RematchAllShaders_Internal: Shader Hash: {:08X}", entry.hash);
+                    REX::INFO("RematchAllShaders_Internal: Shader Size: {} bytes", entry.size);
                     REX::INFO("RematchAllShaders_Internal: Shader ASM Hash: {:08X}", entry.asmHash);
                     REX::INFO(" - Shader CB Sizes: {},{},{},{},{},{},{},{},{},{},{},{},{},{}", 
                         entry.expectedCBSizes[0], entry.expectedCBSizes[1], entry.expectedCBSizes[2], entry.expectedCBSizes[3],
@@ -869,6 +931,70 @@ void RematchAllShaders_Internal() {
         REX::INFO("RematchAllShaders_Internal: Matched {} pixel shaders and {} vertex shaders", matchedPS, matchedVS);
 }
 
+void UIDrawShaderSettingsOverlay() {
+    // Position window in top-right corner
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - SHADERSETTINGS_WIDTH - 10, 10), ImGuiCond_Always);
+    // Set width/height
+    ImGui::SetNextWindowSize(ImVec2(SHADERSETTINGS_WIDTH, SHADERSETTINGS_HEIGHT), ImGuiCond_Always);
+    // Make background semi-transparent
+    ImGui::SetNextWindowBgAlpha(SHADERSETTINGS_OPACITY);
+    // Create the Window
+    ImGui::Begin("GFXBooster Settings");
+    // Render a row for each shader value with appropriate control based on type
+    auto renderRow = [&](ShaderValue &sValue) {
+        ImGui::PushID(sValue.id.c_str());
+        switch (sValue.type) {
+            case ShaderValue::Type::Bool:
+                if (ImGui::Checkbox(sValue.label.c_str(), &sValue.current.b)) {
+                    /* value changed if you need to react */
+                }
+                break;
+            case ShaderValue::Type::Int:
+                if (ImGui::SliderInt(sValue.label.c_str(), &sValue.current.i, sValue.min.i, sValue.max.i)) {
+                    /* value changed */
+                }
+                break;
+            case ShaderValue::Type::Float:
+                if (ImGui::SliderFloat(sValue.label.c_str(), &sValue.current.f, sValue.min.f, sValue.max.f, "%.3f", ImGuiSliderFlags_AlwaysClamp)) {
+                    /* value changed */
+                }
+                break;
+        }
+        ImGui::PopID();
+    };
+    // Collapsing header for global shader settings
+    if (ImGui::CollapsingHeader("Global Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // Render global shader values
+        for (auto* sValue : g_shaderSettings.GetGlobalShaderValues()) {
+            if (sValue) {
+                renderRow(*sValue);
+            }
+        }
+    }
+    // Collapsing header for active shader definitions and their settings
+    if (ImGui::CollapsingHeader("Shader Settings", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        // Group local values by shaderDefinitionId
+        std::unordered_map<std::string, std::vector<ShaderValue*>> settingsGroups;
+        for (auto* sValue : g_shaderSettings.GetLocalShaderValues()) {
+            if (!sValue) continue;
+            settingsGroups[sValue->shaderDefinitionId].push_back(sValue);
+        }
+        // Draw one collapsing header per definition and render children only if open
+        for (auto &kv : settingsGroups) {
+            const std::string &defId = kv.first;
+            auto &vals = kv.second;
+            if (ImGui::CollapsingHeader(defId.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                for (auto* sValue : vals) {
+                    if (sValue) renderRow(*sValue);
+                }
+            }
+        }
+    }
+    ImGui::End();
+}
+
 // DEVGUI drawing function for shader debug overlay is called by the Hook Present once per frame
 // Should ONLY contain ImGui drawing code!
 void UIDrawShaderDebugOverlay() {
@@ -896,18 +1022,18 @@ void UIDrawShaderDebugOverlay() {
         float pad   = ImGui::GetStyle().ItemSpacing.x * 2.0f;
         ImGui::SetColumnWidth(1, charW * 8.0f + pad); // Status (8 chars)
         ImGui::SetColumnWidth(2, charW * 4.0f + pad); // Used   (4 chars)
-        ImGui::SetColumnWidth(3, charW * 8.0f + pad); // Hash   (8 chars)
+        ImGui::SetColumnWidth(3, charW * 14.0f + pad); // ShaderUID   (14 chars)
         ImGui::SetColumnWidth(4, charW * 7.0f + pad); // Action (7 chars)
         // Fix the ID column to take up the remaining space after the fixed columns
         float totalAvail = DEVGUI_WIDTH - ImGui::GetStyle().WindowPadding.x * 2.0f;
-        float fixedCols  = (charW * (8+4+8+7)) + pad * 4.0f;
+        float fixedCols  = (charW * (8+4+14+7)) + pad * 4.0f;
         float remaining   = (std::max)(0.0f, totalAvail - fixedCols);
         ImGui::SetColumnWidth(0, remaining);
         // Headers
         ImGui::Text("ID"); ImGui::NextColumn();
         ImGui::Text("Status");        ImGui::NextColumn();
         ImGui::Text("Used");          ImGui::NextColumn();
-        ImGui::Text("Hash");          ImGui::NextColumn();
+        ImGui::Text("ShaderUID");     ImGui::NextColumn();
         ImGui::Text("Action");        ImGui::NextColumn();
         ImGui::Separator();
         // Render a single row
@@ -935,8 +1061,9 @@ void UIDrawShaderDebugOverlay() {
                 ImGui::TextColored(ImVec4(0.5f,0.5f,0.5f,1), "NO");
             }
             ImGui::NextColumn();
-            // Column 4: Hash
-            ImGui::Text("%08X", entry.hash);
+            // Column 4: ShaderUID
+            const char* shaderUID = entry.shaderUID.empty() ? "<unknown>" : entry.shaderUID.c_str();
+            ImGui::Text("%s", shaderUID);
             ImGui::NextColumn();
             // Column 5: Actions (Flash)
             ImGui::PushID((void*)entry.originalShader); // Use original shader pointer as unique ID to avoid ID collisions in the list
@@ -1124,6 +1251,9 @@ void UpdateCustomBuffer_Internal() {
     auto& PM = camView.projMat; // __m128 projMat[4]
     DirectX::XMMATRIX proj = DirectX::XMMATRIX(PM[0], PM[1], PM[2], PM[3]);   // load into XMMATRIX
     DirectX::XMMATRIX invProj = DirectX::XMMatrixInverse(nullptr, proj);
+    // Get the View Projection matrix
+    DirectX::XMMATRIX view = DirectX::XMMATRIX(VM[0], VM[1], VM[2], VM[3]);
+    DirectX::XMMATRIX viewProj = DirectX::XMMatrixMultiply(view, proj);
     // Get a random number each frame
     float randomValue = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
     // Fill the custom buffer data structure
@@ -1158,6 +1288,25 @@ void UpdateCustomBuffer_Internal() {
     g_customBufferData.random  = randomValue;
     g_customBufferData.inCombat = g_inCombat ? 1.0f : 0.0f;
     g_customBufferData.inInterior = g_inInterior ? 1.0f : 0.0f;
+    g_customBufferData._padding = 0.0f; // just in case, to avoid any potential uninitialized data issues in shaders
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewProjRow0, viewProj.r[0]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewProjRow1, viewProj.r[1]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewProjRow2, viewProj.r[2]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewProjRow3, viewProj.r[3]);
+    // Write shader settings directly into the struct arrays by bufferIndex.
+    // This matches exactly what the HLSL #defines reference (modularFloats[N], etc.)
+    for (auto* sv : g_shaderSettings.GetFloatShaderValues()) {
+        if (sv->bufferIndex < 200)
+            g_customBufferData.modularFloats[sv->bufferIndex] = sv->current.f;
+    }
+    for (auto* sv : g_shaderSettings.GetIntShaderValues()) {
+        if (sv->bufferIndex < 100)
+            g_customBufferData.modularInts[sv->bufferIndex] = sv->current.i;
+    }
+    for (auto* sv : g_shaderSettings.GetBoolShaderValues()) {
+        if (sv->bufferIndex < 100)
+            g_customBufferData.modularBools[sv->bufferIndex] = sv->current.b ? 1 : 0;
+    }
     // Create or update our custom buffer resource view with the new data
     if (!g_rendererData) {
         g_rendererData = RE::BSGraphics::GetRendererData();
@@ -1247,8 +1396,8 @@ bool InstallGFXHooks_Internal() {
     REX::INFO("InstallGFXHooks_Internal: Present hook installed");
     REX::INFO("InstallGFXHooks_Internal: All Hooks installed successfully");
     // Set up ImGui if DEVGUI_ON=true
-    if (!DEVGUI_ON) {
-        REX::INFO("InstallGFXHooks_Internal: DEVGUI_ON is false, skipping ImGui initialization");
+    if (!DEVGUI_ON && !SHADERSETTINGS_ON) {
+        REX::INFO("InstallGFXHooks_Internal: DEVGUI_ON and SHADERSETTINGS_ON are false, skipping ImGui initialization");
         return true;
     }
     // All Hooks installed successfully
@@ -1301,6 +1450,13 @@ bool InstallGFXHooks_Internal() {
         REX::WARN("Failed to get game window handle");
         return false;
     }
+    // map the END key
+    bool endDown = (GetAsyncKeyState(VK_END) & 0x8000) != 0;
+    io.AddKeyEvent(ImGuiKey_End, endDown);
+    // map the HOME key
+    bool homeDown = (GetAsyncKeyState(VK_HOME) & 0x8000) != 0;
+    io.AddKeyEvent(ImGuiKey_Home, homeDown);
+    // Initialize ImGui for Win32 and DirectX 11
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(
         reinterpret_cast<ID3D11Device*>(g_rendererData->device),

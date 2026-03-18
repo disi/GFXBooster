@@ -13,9 +13,9 @@ std::shared_ptr<spdlog::logger> gLog;
 namespace Version
 {
     inline constexpr std::size_t MAJOR = 0;
-    inline constexpr std::size_t MINOR = 0;
-    inline constexpr std::size_t PATCH = 4;
-    inline constexpr auto NAME = "0.0.4"sv;
+    inline constexpr std::size_t MINOR = 1;
+    inline constexpr std::size_t PATCH = 5;
+    inline constexpr auto NAME = "0.1.5"sv;
     inline constexpr auto AUTHORNAME = "disi"sv;
     inline constexpr auto PROJECT = "GFXBoosterCL"sv;
 } // namespace Version
@@ -43,14 +43,26 @@ std::string g_iniName = "GFXBoosterCL.ini";
 std::string g_logName = "GFXBoosterCL.log";
 // Global plugin path
 std::filesystem::path g_pluginPath;
+// Shader folder path for loading custom shaders and watching for changes in development mode
+std::filesystem::path g_shaderFolderPath;
 // Global debug flag
 bool DEBUGGING = false;
 // Custom buffer update flag
 bool CUSTOMBUFFER_ON = true;
 // Custom resource view slot in shader
 UINT CUSTOMBUFFER_SLOT = 14;
-// Shader folder path for loading custom shaders and watching for changes in development mode
-std::filesystem::path g_shaderFolderPath;
+// Shader settings menu flag
+bool SHADERSETTINGS_ON = false;
+// Shader settings menu hotkey (default END key)
+UINT SHADERSETTINGS_MENUHOTKEY = VK_END;
+// Settings save hotkey (default HOME key)
+UINT SHADERSETTINGS_SAVEHOTKEY = VK_HOME;
+// Settings menu width
+int SHADERSETTINGS_WIDTH = 600;
+// Settings menu height
+int SHADERSETTINGS_HEIGHT = 300;
+// Settings menu opacity (0.0 - 1.0)
+float SHADERSETTINGS_OPACITY = 0.75f;
 // Global Development features flag (like dumping shaders, extra logging, etc)
 bool DEVELOPMENT = false;
 // Development GUI flag
@@ -60,13 +72,15 @@ int DEVGUI_WIDTH = 600;
 // Development GUI Height
 int DEVGUI_HEIGHT = 300;
 // Development GUI opacity (0.0 - 1.0)
-float DEVGUI_OPACITY = 0.5f;
+float DEVGUI_OPACITY = 0.75f;
 // Global ImGui state flag
 bool g_imguiInitialized = false;
 // Global flag if GFX hooks are installed
 bool GFX_HOOKS_INSTALLED = false;
 // Shader definitions from INI
 ShaderDefDB g_shaderDefinitions = {};
+// Shader values from INI
+GlobalShaderSettings g_shaderSettings = {};
 // Shader include path for D3DCompile calls
 std::filesystem::path g_commonShaderHeaderPath;
 // Global INI watcher map for hot-reloading shader definitions when their files change
@@ -155,17 +169,19 @@ std::vector<std::filesystem::path> GetSubdirectories(const std::filesystem::path
 // Helper to load all shader definitions from a Shader.ini file
 // Returns number of definitions loaded
 int LoadShaderDefinitionsFromFile(const std::filesystem::path& shaderFolderPath, const std::string& folderName) {
-    std::filesystem::path iniPath = shaderFolderPath / "Shader.ini";
-    if (!FileExists(iniPath)) {
+    std::filesystem::path iniShaderPath = shaderFolderPath / "Shader.ini";
+    if (!FileExists(iniShaderPath)) {
         REX::WARN("LoadShaderDefinitionsFromFile: Shader.ini not found in: {}", shaderFolderPath.string());
         return 0;
     }
-    std::ifstream file(iniPath, std::ios::in);
+    std::ifstream file(iniShaderPath, std::ios::in);
     if (!file.is_open()) {
-        REX::WARN("LoadShaderDefinitionsFromFile: Could not open Shader.ini: {}", iniPath.string());
+        REX::WARN("LoadShaderDefinitionsFromFile: Could not open Shader.ini: {}", iniShaderPath.string());
         return 0;
     }
     int loadedCount = 0;
+    std::string cachedShaderID;
+    bool hasCachedShaderID = false;
     std::string line;
     while (std::getline(file, line)) {
         // Skip empty lines and comments
@@ -174,12 +190,13 @@ int LoadShaderDefinitionsFromFile(const std::filesystem::path& shaderFolderPath,
         std::string clean = RemoveInlineComment(line);
         // Remove all whitespace for easier parsing
         clean = RemoveAllWhitespace(clean);
+        if (clean.empty()) continue;
         // Check if this is a section start (e.g., [loading_screen])
         if (clean[0] == '[' && clean.back() == ']' && clean.find('/') != 0) {
             // Extract shader ID from section name
             std::string shaderId = clean.substr(1, clean.length() - 2);
             if (shaderId.empty()) {
-                REX::WARN("LoadShaderDefinitionsFromFile: Empty section name in {}", iniPath.string());
+                REX::WARN("LoadShaderDefinitionsFromFile: Empty section name in {}", iniShaderPath.string());
                 continue;
             }
             // Create new shader definition
@@ -200,7 +217,7 @@ int LoadShaderDefinitionsFromFile(const std::filesystem::path& shaderFolderPath,
                 }
                 // Check if we hit another section start (malformed INI)
                 if (clean[0] == '[') {
-                    REX::WARN("LoadShaderDefinitionsFromFile: Found new section before closing tag {} in {}", endTag, iniPath.string());
+                    REX::WARN("LoadShaderDefinitionsFromFile: Found new section before closing tag {} in {}", endTag, iniShaderPath.string());
                     break;
                 }
                 // Get key-value pair
@@ -229,6 +246,18 @@ int LoadShaderDefinitionsFromFile(const std::filesystem::path& shaderFolderPath,
                     std::string type = ToLower(value);
                     if (type == "vs" || type == "vertex") {
                         def.type = ShaderType::Vertex;
+                    }
+                }
+                // Default empty vector
+                else if (lowerKey == "shaderuid") {
+                    std::stringstream ss(value);
+                    std::string segment;
+                    while (std::getline(ss, segment, ',')) {
+                        try {
+                            def.shaderUID.push_back(segment);
+                        } catch (...) {
+                            REX::WARN("LoadShaderDefinitionsFromFile: Invalid shaderUID for {}: {}", shaderId, segment);
+                        }
                     }
                 }
                 // Default to 0
@@ -476,18 +505,164 @@ int LoadShaderDefinitionsFromFile(const std::filesystem::path& shaderFolderPath,
                     }
                 }
             }
+            // Cache the ShaderDefinition ID
+            std::string shaderID = def.id;
+            if (!hasCachedShaderID) {
+                cachedShaderID = shaderID;
+                hasCachedShaderID = true;
+            }
             // Add the definition to global list
             g_shaderDefinitions.AddDefinition(new ShaderDefinition(std::move(def)));
             loadedCount++;
-            REX::INFO("LoadShaderDefinitionsFromFile: Loaded shader '{}' from {}/Shader.ini", shaderId, folderName);
+            REX::INFO("LoadShaderDefinitionsFromFile: Loaded shader '{}' from {}/Shader.ini", shaderID, folderName);
         }
     }
     file.close();
+    // Load Values.ini once per folder and assign values to the first loaded definition ID
+    std::filesystem::path iniValuesPath = shaderFolderPath / "Values.ini";
+    if (!FileExists(iniValuesPath)) {
+        REX::WARN("LoadShaderDefinitionsFromFile: Values.ini not found in: {}", shaderFolderPath.string());
+    }
+    std::ifstream valuesFile(iniValuesPath, std::ios::in);
+    if (!valuesFile.is_open()) {
+        REX::WARN("LoadShaderDefinitionsFromFile: Could not open Values.ini: {}", iniValuesPath.string());
+    } else if (!hasCachedShaderID) {
+        REX::WARN("LoadShaderDefinitionsFromFile: No shader definition loaded in {}. Skipping Values.ini", shaderFolderPath.string());
+    } else {
+        std::string valueLine;
+        while (std::getline(valuesFile, valueLine)) {
+            // Create new shader value
+            ShaderValue shaderV;
+            // Skip empty lines and comments
+            if (valueLine.empty() || valueLine[0] == ';') continue;
+            // Remove inline comments and trim
+            std::string clean = RemoveInlineComment(valueLine);
+            // Remove all whitespace for easier parsing
+            clean = RemoveAllWhitespace(clean);
+            if (clean.empty()) continue;
+            // Check if this is a section start (e.g., [global] or [local])
+            if (clean[0] == '[' && clean.back() == ']' && clean.find('/') != 0) {
+                // Extract value scope from section name
+                std::string valueScope = clean.substr(1, clean.length() - 2);
+                if (valueScope.empty()) {
+                    REX::WARN("LoadShaderDefinitionsFromFile: Empty value scope in {}", iniValuesPath.string());
+                    continue;
+                }
+                shaderV.shaderDefinitionId = cachedShaderID;
+                // Read all properties until we hit the closing tag [/scope]
+                std::string endTag = "[/" + valueScope + "]";
+                // Check if global values section
+                if (ToLower(valueScope) == "global") {
+                    shaderV.global = true;
+                }
+                while (std::getline(valuesFile, valueLine)) {
+                    // Skip empty lines and comments
+                    if (valueLine.empty() || valueLine[0] == ';') continue;
+                    // Remove inline comments and trim
+                    std::string valueClean = RemoveInlineComment(valueLine);
+                    // Remove all whitespace for easier parsing
+                    valueClean = RemoveAllWhitespace(valueClean);
+                    if (valueClean.empty()) continue;
+                    // Check for end tag
+                    if (ToLower(valueClean) == ToLower(endTag)) {
+                        break;
+                    }
+                    // Check if we hit another section start (malformed INI)
+                    if (valueClean[0] == '[') {
+                        REX::WARN("LoadShaderDefinitionsFromFile: Found new value before closing tag {} in {}", endTag, iniValuesPath.string());
+                        break;
+                    }
+                    // Get key-value pair
+                    auto[key, value] = GetKeyValueFromLine(valueClean);
+                    // If key or value is empty, skip and use default values for this line
+                    if (key.empty() || value.empty()) continue;
+                    // create lower key for easier comparison
+                    auto lowerKey = ToLower(key);
+                    if (lowerKey == "id") {
+                        shaderV.id = value;
+                    }
+                    else if (lowerKey == "label") {
+                        shaderV.label = value;
+                    }
+                    else if (lowerKey == "type") {
+                        std::string type = ToLower(value);
+                        if (type == "bool") {
+                            shaderV.type = ShaderValue::Type::Bool;
+                        }
+                        else if (type == "int") {
+                            shaderV.type = ShaderValue::Type::Int;
+                        }
+                        else if (type == "float") {
+                            shaderV.type = ShaderValue::Type::Float;
+                        }
+                    }
+                    else if (lowerKey == "value") {
+                        try {
+                            if (shaderV.type == ShaderValue::Type::Bool) {
+                                shaderV.current.b = (ToLower(value) == "true" || value == "1");
+                                shaderV.def.b = (ToLower(value) == "true" || value == "1");
+                            }
+                            else if (shaderV.type == ShaderValue::Type::Int) {
+                                shaderV.current.i = std::stoi(value);
+                                shaderV.def.i = std::stoi(value);
+                            }
+                            else if (shaderV.type == ShaderValue::Type::Float) {
+                                shaderV.current.f = std::stof(value);
+                                shaderV.def.f = std::stof(value);
+                            }
+                        } catch (...) {
+                            REX::WARN("LoadShaderDefinitionsFromFile: Invalid value for {}: {}", shaderV.id, value);
+                        }
+                    }
+                    else if (lowerKey == "min") {
+                        try {
+                            if (shaderV.type == ShaderValue::Type::Int) {
+                                shaderV.min.i = std::stoi(value);
+                            }
+                            else if (shaderV.type == ShaderValue::Type::Float) {
+                                shaderV.min.f = std::stof(value);
+                            }
+                        } catch (...) {
+                            REX::WARN("LoadShaderDefinitionsFromFile: Invalid min value for {}: {}", shaderV.id, value);
+                        }
+                    }
+                    else if (lowerKey == "max") {
+                        try {
+                            if (shaderV.type == ShaderValue::Type::Int) {
+                                shaderV.max.i = std::stoi(value);
+                            }
+                            else if (shaderV.type == ShaderValue::Type::Float) {
+                                shaderV.max.f = std::stof(value);
+                            }
+                        } catch (...) {
+                            REX::WARN("LoadShaderDefinitionsFromFile: Invalid max value for {}: {}", shaderV.id, value);
+                        }
+                    }
+                    else if (lowerKey == "step") {
+                        try {
+                            if (shaderV.type == ShaderValue::Type::Int) {
+                                shaderV.step.i = std::stoi(value);
+                            }
+                            else if (shaderV.type == ShaderValue::Type::Float) {
+                                shaderV.step.f = std::stof(value);
+                            }
+                        } catch (...) {
+                            REX::WARN("LoadShaderDefinitionsFromFile: Invalid step value for {}: {}", shaderV.id, value);
+                        }
+                    }
+                }
+                ShaderValue finalShaderV = shaderV; // Make a copy for ownership handoff
+                g_shaderSettings.AddShaderValue(new ShaderValue(std::move(finalShaderV)));
+            }
+        }
+        REX::INFO("LoadShaderDefinitionsFromFile: Loaded values for shader '{}' from {}/Values.ini", cachedShaderID, folderName);
+    }
+    valuesFile.close();
     // After loading all definitions from this INI file, create a watcher for it
     if (DEVELOPMENT && loadedCount > 0) {
-        auto watcher = std::make_unique<ShaderIniFileWatcher>(iniPath, folderName);
+        auto watcher = std::make_unique<ShaderIniFileWatcher>(iniShaderPath, folderName);
         watcher->Start();
-        g_iniWatchers[iniPath] = std::move(watcher);
+        g_iniWatchers[iniShaderPath] = std::move(watcher);
     }
     return loadedCount;
 }
@@ -532,6 +707,61 @@ void LoadConfig(HMODULE hModule) {
                 REX::INFO("LoadConfig: CUSTOMBUFFER_SLOT set to {}", CUSTOMBUFFER_SLOT);
             } catch (...) {
                 REX::WARN("LoadConfig: Invalid CUSTOMBUFFER_SLOT value: {}. Using default: {}", value, CUSTOMBUFFER_SLOT);
+            }
+            continue;
+        }
+        else if (lowerKey == "shadersettings_on") {
+            SHADERSETTINGS_ON = (ToLower(value) == "true" || value == "1");
+            REX::INFO("LoadConfig: SHADERSETTINGS_ON set to {}", SHADERSETTINGS_ON);
+            continue;
+        }
+        else if (lowerKey == "shadersettings_menuhotkey") {
+            try {
+                SHADERSETTINGS_MENUHOTKEY = static_cast<UINT>(std::stoi(value));
+                REX::INFO("LoadConfig: SHADERSETTINGS_MENUHOTKEY set to {}", SHADERSETTINGS_MENUHOTKEY);
+            } catch (...) {
+                REX::WARN("LoadConfig: Invalid SHADERSETTINGS_MENUHOTKEY value: {}. Using default: {}", value, SHADERSETTINGS_MENUHOTKEY);
+            }
+            continue;
+        }
+        else if (lowerKey == "shadersettings_savehotkey") {
+            try {
+                SHADERSETTINGS_SAVEHOTKEY = static_cast<UINT>(std::stoi(value));
+                REX::INFO("LoadConfig: SHADERSETTINGS_SAVEHOTKEY set to {}", SHADERSETTINGS_SAVEHOTKEY);
+            } catch (...) {
+                REX::WARN("LoadConfig: Invalid SHADERSETTINGS_SAVEHOTKEY value: {}. Using default: {}", value, SHADERSETTINGS_SAVEHOTKEY);
+            }
+            continue;
+        }
+        else if (lowerKey == "shadersettings_width") {
+            try {
+                SHADERSETTINGS_WIDTH = std::stoi(value);
+                REX::INFO("LoadConfig: SHADERSETTINGS_WIDTH set to {}", SHADERSETTINGS_WIDTH);
+            } catch (...) {
+                REX::WARN("LoadConfig: Invalid SHADERSETTINGS_WIDTH value: {}. Using default: {}", value, SHADERSETTINGS_WIDTH);
+            }
+            continue;
+        }
+        else if (lowerKey == "shadersettings_height") {
+            try {
+                SHADERSETTINGS_HEIGHT = std::stoi(value);
+                REX::INFO("LoadConfig: SHADERSETTINGS_HEIGHT set to {}", SHADERSETTINGS_HEIGHT);
+            } catch (...) {
+                REX::WARN("LoadConfig: Invalid SHADERSETTINGS_HEIGHT value: {}. Using default: {}", value, SHADERSETTINGS_HEIGHT);
+            }
+            continue;
+        }
+        else if (lowerKey == "shadersettings_opacity") {
+            try {
+                SHADERSETTINGS_OPACITY = std::stof(value);
+                if (SHADERSETTINGS_OPACITY < 0.0f || SHADERSETTINGS_OPACITY > 1.0f) {
+                    REX::WARN("LoadConfig: SHADERSETTINGS_OPACITY value out of range (0.0 - 1.0): {}. Using default: {}", value, SHADERSETTINGS_OPACITY);
+                    SHADERSETTINGS_OPACITY = 0.75f;
+                } else {
+                    REX::INFO("LoadConfig: SHADERSETTINGS_OPACITY set to {}", SHADERSETTINGS_OPACITY);
+                }
+            } catch (...) {
+                REX::WARN("LoadConfig: Invalid SHADERSETTINGS_OPACITY value: {}. Using default: {}", value, SHADERSETTINGS_OPACITY);
             }
             continue;
         }
@@ -595,6 +825,8 @@ void LoadConfig(HMODULE hModule) {
             REX::INFO("LoadConfig: Loaded {} definition(s) from {}", count, folderName);
         }
     }
+    // Load stored shader settings values from disk
+    g_shaderSettings.LoadSettings();
     REX::INFO("LoadConfig: Completed. Loaded {} shader definition(s) total", totalDefinitions);
     // Add HlslFileWatcher for shaderBasePath to automatically reload shader definitions on changes
     if (DEVELOPMENT) {
@@ -742,11 +974,11 @@ extern "C"
         // First log
         REX::INFO("{}: Plugin Query started.", Version::PROJECT);
         // Minimum version 1.10.163
-        const auto ver = f4se->RuntimeVersion();
-        if (ver < F4SE::RUNTIME_1_10_162) {
-            gLog->critical("unsupported runtime v{}", ver.string());
-            return false;
-        }
+        //const auto ver = f4se->RuntimeVersion();
+        //if (ver < F4SE::RUNTIME_1_10_162) {
+        //    gLog->critical("unsupported runtime v{}", ver.string());
+        //    return false;
+        //}
         return true;
     }
 

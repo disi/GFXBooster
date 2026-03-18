@@ -30,6 +30,18 @@ extern bool DEBUGGING;
 extern bool CUSTOMBUFFER_ON;
 // Custom resource view slot in shader
 extern UINT CUSTOMBUFFER_SLOT;
+// Shader settings menu flag
+extern bool SHADERSETTINGS_ON;
+// Shader settings menu hotkey (default END key)
+extern UINT SHADERSETTINGS_MENUHOTKEY;
+// Settings save hotkey (default HOME key)
+extern UINT SHADERSETTINGS_SAVEHOTKEY;
+// Settings menu width
+extern int SHADERSETTINGS_WIDTH;
+// Settings menu height
+extern int SHADERSETTINGS_HEIGHT;
+// Settings menu opacity (0.0 - 1.0)
+extern float SHADERSETTINGS_OPACITY;
 // Global development flag
 extern bool DEVELOPMENT;
 // Dev GUI flag
@@ -40,8 +52,12 @@ extern int DEVGUI_WIDTH;
 extern int DEVGUI_HEIGHT;
 // Dev GUI Opacity
 extern float DEVGUI_OPACITY;
+// Global shader settings
+extern GlobalShaderSettings g_shaderSettings;
 // Shader definitions from INI
 extern ShaderDefDB g_shaderDefinitions;
+// Shader values from INI
+extern std::vector<ShaderValue> g_shaderValues;
 // Global original shader database
 extern ShaderDB g_ShaderDB;
 // Global shader include path
@@ -60,6 +76,9 @@ inline std::string ToLower(const std::string& str) {
     std::transform(out.begin(), out.end(), out.begin(), ::tolower);
     return out;
 }
+
+std::string GetCommonShaderHeaderHLSLTop();
+std::string GetCommonShaderHeaderHLSLBottom();
 
 // REX Logging Compatibility
 #undef ERROR
