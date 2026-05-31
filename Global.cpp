@@ -9,7 +9,9 @@ DEBUGGING=false
 ; This setting applies to all replaced shaders
 ; Shaders with #include "common.inc" have access to ingame data like FPS, Camera position and shader settings
 CUSTOMBUFFER_ON=true
-; Custom resource view slot in shader (beyond what the game uses, default t14)
+; Custom depth SRV slot in shader (default t30)
+DEPTHBUFFER_SLOT=30
+; Custom resource view slot in shader (beyond what the game uses, default t31)
 CUSTOMBUFFER_SLOT=31
 ; --- SHADER SETTINGS ---
 ; Enable/disable settings menu
@@ -39,13 +41,13 @@ DEVGUI_HEIGHT=300
 DEVGUI_OPACITY=0.75
 
 ; Folder structure
-; /F4SE/Plugins/GFXBoosterCL.ini - main configuration file for shader replacement rules
-; /F4SE/Plugins/GFXBoosterDumps/<ShaderDefinition ID>/ - folder with dumped original shaders for analysis
-; /F4SE/Plugins/GFXBoosterCL/<ShaderDefinition>/ - folder for replacement shaders
-; /F4SE/Plugins/GFXBoosterCL/<ShaderDefinition>/Shader.ini - settings for the replacement shader, see below for example format
-; /F4SE/Plugins/GFXBoosterCL/<ShaderDefinition>/Values.ini - settings for shader values, see below for example format
-; /F4SE/Plugins/GFXBoosterCL/<ShaderDefinition>/<Shadername>.ps.hlsl - example replacement pixel shader in HLSL
-; /F4SE/Plugins/GFXBoosterCL/<ShaderDefinition>/<Shadername>.vs.hlsl - example replacement vertex shader in HLSL
+; /F4SE/Plugins/ShaderEngine.ini - main configuration file for shader replacement rules
+; /F4SE/Plugins/ShaderEngineDumps/<ShaderDefinition ID>/ - folder with dumped original shaders for analysis
+; /F4SE/Plugins/ShaderEngine/<ShaderDefinition>/ - folder for replacement shaders
+; /F4SE/Plugins/ShaderEngine/<ShaderDefinition>/Shader.ini - settings for the replacement shader, see below for example format
+; /F4SE/Plugins/ShaderEngine/<ShaderDefinition>/Values.ini - settings for shader values, see below for example format
+; /F4SE/Plugins/ShaderEngine/<ShaderDefinition>/<Shadername>.ps.hlsl - example replacement pixel shader in HLSL
+; /F4SE/Plugins/ShaderEngine/<ShaderDefinition>/<Shadername>.vs.hlsl - example replacement vertex shader in HLSL
 
 ;Dimensions:
 ; D3D11_SRV_DIMENSION_TEXTURE1D = 3
@@ -57,7 +59,7 @@ DEVGUI_OPACITY=0.75
 ; D3D11_SRV_DIMENSION_TEXTURE2DARRAY = 5
 ; D3D11_SRV_DIMENSION_TEXTURECUBEARRAY = 11
 
-; Example shader definition in /F4SE/Plugins/GFXBoosterCL/<ShaderDefinitionName>/Shader.ini
+; Example shader definition in /F4SE/Plugins/ShaderEngine/<ShaderDefinitionName>/Shader.ini
 ;[loadingScreen]             ; unique ShaderDefinition ID for this replacement rule, whitespace is removed for parsing
 ;active=true                 ; whether this shader replacement rule is active
 ;priority=0                  ; priority of this rule for matching when multiple rules could apply (lower number = higher priority)
@@ -78,41 +80,54 @@ DEVGUI_OPACITY=0.75
 ;outputMask=0x1              ; match of the bitmask for required output registers (bit i is 1 if output register o[i] is required)
 ;shader=GFXBoosterLS.hlsl    ; the replacement shader file name in the shader definition folder, CANNOT have white spaces in the filename and must be a .hlsl file
 ;log=true                    ; whether to log shader detection and reflection details to the F4SE logs for this shader replacement rule
-;dump=true                   ; whether to dump the original shader for analysis to the GFXBoosterDumps folder for this shader replacement rule (existing dumps files will not be overwritten, but skipped)
+;dump=true                   ; whether to dump the original shader for analysis to the ShaderEngineDumps folder for this shader replacement rule (existing dumps files will not be overwritten, but skipped)
 ;[/loadingScreen]
 
 ; Adding #include "common.inc" to the replacement shader gives access to:
 ;    float    GFXInjected[0].g_Time
-;    float    GFXInjected[0].g_Delta;
-;    float    GFXInjected[0].g_DayCycle;
-;    float    GFXInjected[0].g_Frame;
-;    float    GFXInjected[0].g_FPS;
-;    float    GFXInjected[0].g_ResX;
-;    float    GFXInjected[0].g_ResY;
-;    float    GFXInjected[0].g_MouseX;
-;    float    GFXInjected[0].g_MouseY;
-;    float    GFXInjected[0].g_WindSpeed; // updated every 30 frames
-;    float    GFXInjected[0].g_WindAngle; // updated every 30 frames
-;    float    GFXInjected[0].g_WindTurb; // updated every 30 frames
-;    float    GFXInjected[0].g_VpLeft;
-;    float    GFXInjected[0].g_VpTop;
-;    float    GFXInjected[0].g_VpWidth;
-;    float    GFXInjected[0].g_VpHeight;
-;    float3   GFXInjected[0].g_CameraPos;
-;    float    GFXInjected[0].g_RadExp; // rad dmg taken over 30 frames
-;    float3   GFXInjected[0].g_ViewDir;
-;    float    GFXInjected[0].g_HealthPerc; // updated every 30 frames
-;    float4   GFXInjected[0].g_InvProjRow0;
-;    float4   GFXInjected[0].g_InvProjRow1;
-;    float4   GFXInjected[0].g_InvProjRow2;
-;    float4   GFXInjected[0].g_InvProjRow3;
-;    float    GFXInjected[0].g_Random; // random value updated every frame
-;    float    GFXInjected[0].g_Combat; // updated every 30 frames
-;    float    GFXInjected[0].g_Interior; // updated every 30 frames
-;    float4   GFXInjected[0].g_ViewProjRow0;
-;    float4   GFXInjected[0].g_ViewProjRow1;
-;    float4   GFXInjected[0].g_ViewProjRow2;
-;    float4   GFXInjected[0].g_ViewProjRow3;
+;    float    GFXInjected[0].g_Delta
+;    float    GFXInjected[0].g_DayCycle
+;    float    GFXInjected[0].g_Frame
+;    float    GFXInjected[0].g_FPS
+;    float    GFXInjected[0].g_ResX
+;    float    GFXInjected[0].g_ResY
+;    float    GFXInjected[0].g_MouseX
+;    float    GFXInjected[0].g_MouseY
+;    float    GFXInjected[0].g_WindSpeed    // updated every 30 frames
+;    float    GFXInjected[0].g_WindAngle    // updated every 30 frames
+;    float    GFXInjected[0].g_WindTurb     // updated every 30 frames
+;    float4   GFXInjected[0].g_ViewPort
+;    float3   GFXInjected[0].g_CameraPos
+;    float    GFXInjected[0].g_RadExp       // rad dmg taken over 30 frames
+;    float3   GFXInjected[0].g_ViewDir
+;    float    GFXInjected[0].g_Random       // random value updated every frame
+;    float    GFXInjected[0].g_Combat       // updated every 30 frames
+;    float    GFXInjected[0].g_Interior     // updated every 30 frames
+;    float    GFXInjected[0].g_HealthPerc   // updated every 30 frames
+;    float4   GFXInjected[0].g_ViewMatrixRow0
+;    float4   GFXInjected[0].g_ViewMatrixRow1
+;    float4   GFXInjected[0].g_ViewMatrixRow2
+;    float4   GFXInjected[0].g_ViewMatrixRow3
+;    float4   GFXInjected[0].g_ProjMatrixRow0
+;    float4   GFXInjected[0].g_ProjMatrixRow1
+;    float4   GFXInjected[0].g_ProjMatrixRow2
+;    float4   GFXInjected[0].g_ProjMatrixRow3
+;    float4   GFXInjected[0].g_ViewProjMatrixRow0
+;    float4   GFXInjected[0].g_ViewProjMatrixRow1
+;    float4   GFXInjected[0].g_ViewProjMatrixRow2
+;    float4   GFXInjected[0].g_ViewProjMatrixRow3
+;    float4   GFXInjected[0].g_InvViewProjMatrixRow0
+;    float4   GFXInjected[0].g_InvViewProjMatrixRow1
+;    float4   GFXInjected[0].g_InvViewProjMatrixRow2
+;    float4   GFXInjected[0].g_InvViewProjMatrixRow3
+;    float4   GFXInjected[0].g_InvProjMatrixRow0
+;    float4   GFXInjected[0].g_InvProjMatrixRow1
+;    float4   GFXInjected[0].g_InvProjMatrixRow2
+;    float4   GFXInjected[0].g_InvProjMatrixRow3
+;    float2   GFXInjected[0].g_ViewDepthRange
+;    float    GFXInjected[0].modularFloats[0..199]
+;    int      GFXInjected[0].modularInts[0..99]
+;    int      GFXInjected[0].modularBools[0..99]
 
 ; Settings for shaders can be defined in the Values.ini file in the shader definition folder
 ; Globals are at the top of the menu, while locals are grouped with other values of the shader definition
@@ -182,10 +197,7 @@ std::string GetCommonShaderHeaderHLSLTop()
             float    g_WindTurb;
 
             // Block 3 (Bytes 48-63)
-            float    g_VpLeft;
-            float    g_VpTop;
-            float    g_VpWidth;
-            float    g_VpHeight;
+            float4   g_ViewPort;
 
             // Block 4 (Bytes 64-79)
             float3   g_CameraPos;
@@ -193,25 +205,40 @@ std::string GetCommonShaderHeaderHLSLTop()
 
             // Block 5 (Bytes 80-95)
             float3   g_ViewDir;
-            float    g_HealthPerc;
+            float    g_Random;
 
             // Block 6 (Bytes 96-159)
-            float4   g_InvProjRow0;
-            float4   g_InvProjRow1;
-            float4   g_InvProjRow2;
-            float4   g_InvProjRow3;
-
-            // Block 7 (Bytes 160-175)
-            float    g_Random;
             float    g_Combat;
             float    g_Interior;
             float    _padding;
+            float    g_HealthPerc;
 
-            // Block 8 (Bytes 176-239)
-            float4   g_ViewProjRow0;
-            float4   g_ViewProjRow1;
-            float4   g_ViewProjRow2;
-            float4   g_ViewProjRow3;
+            float4 g_ViewMatrixRow0;
+            float4 g_ViewMatrixRow1;
+            float4 g_ViewMatrixRow2;
+            float4 g_ViewMatrixRow3;
+
+            float4 g_ProjMatrixRow0;
+            float4 g_ProjMatrixRow1;
+            float4 g_ProjMatrixRow2;
+            float4 g_ProjMatrixRow3;
+
+            float4 g_ViewProjMatrixRow0;
+            float4 g_ViewProjMatrixRow1;
+            float4 g_ViewProjMatrixRow2;
+            float4 g_ViewProjMatrixRow3;
+
+            float4 g_InvViewProjMatrixRow0;
+            float4 g_InvViewProjMatrixRow1;
+            float4 g_InvViewProjMatrixRow2;
+            float4 g_InvViewProjMatrixRow3;
+
+            float4 g_InvProjMatrixRow0;
+            float4 g_InvProjMatrixRow1;
+            float4 g_InvProjMatrixRow2;
+            float4 g_InvProjMatrixRow3;
+
+            float2 g_ViewDepthRange;
 
             // Shader settings — fixed-size arrays, layout matches C++ struct exactly
             float modularFloats[200];
@@ -234,29 +261,40 @@ std::string GetCommonShaderHeaderHLSLBottom()
 
         // --- Coordinate Space Helpers ---
 
-        // Transforms screen UV and raw depth into world-space coordinates using the inverse projection matrix.
-        float3 ReconstructWorldPos(float2 uv, float rawDepth)
-        {
-            float4 clipPos;
-            clipPos.x = uv.x * 2.0 - 1.0;
-            clipPos.y = (1.0 - uv.y) * 2.0 - 1.0; 
-            clipPos.z = rawDepth;
-            clipPos.w = 1.0;
-            float4x4 invProj = float4x4(
-                GFXInjected[0].g_InvProjRow0,
-                GFXInjected[0].g_InvProjRow1,
-                GFXInjected[0].g_InvProjRow2,
-                GFXInjected[0].g_InvProjRow3
+        // Transforms screen UV and raw depth into world-space coordinates using the inverse View Projection matrix from the injected data.
+        float3 ReconstructWorldPos(float2 uv, float depth) {
+            float2 ndc = uv * 2.0 - 1.0;
+            ndc.y = -ndc.y; // keep or remove depending on whether your UV->NDC flip is already handled
+            float4 clipPos = float4(ndc, depth, 1.0);
+            float4x4 invViewProj = float4x4(
+                GFXInjected[0].g_InvViewProjMatrixRow0,
+                GFXInjected[0].g_InvViewProjMatrixRow1,
+                GFXInjected[0].g_InvViewProjMatrixRow2,
+                GFXInjected[0].g_InvViewProjMatrixRow3
             );
-            float4 worldPos = mul(clipPos, invProj);
-            return worldPos.xyz / worldPos.w;
+            float4 worldH = mul(clipPos, invViewProj);
+            return worldH.xyz / worldH.w;
+        }
+
+        // Transforms world-space coordinates into screen UV and depth using the View Projection matrix from the injected data.
+        float3 ReconstructScreenPos(float3 worldPos) {
+            float4 worldH = float4(worldPos, 1.0);
+            float4x4 viewProj = float4x4(
+                GFXInjected[0].g_ViewProjMatrixRow0,
+                GFXInjected[0].g_ViewProjMatrixRow1,
+                GFXInjected[0].g_ViewProjMatrixRow2,
+                GFXInjected[0].g_ViewProjMatrixRow3
+            );
+            float4 clipPos = mul(worldH, viewProj);
+            clipPos /= clipPos.w; // perspective divide
+            float2 uv = clipPos.xy * 0.5 + 0.5;
+            return float3(uv, clipPos.z); // returning UV and depth
         }
 
         // --- Color Conversion Helpers ---
 
         // Generates an RGB spectrum color based on a 0.0-1.0 hue input.
-        float3 HueToRGB(float h)
-        {
+        float3 HueToRGB(float h) {
             float r = abs(h * 6.0 - 3.0) - 1.0;
             float g = 2.0 - abs(h * 6.0 - 2.0);
             float b = 2.0 - abs(h * 6.0 - 4.0);
@@ -264,14 +302,12 @@ std::string GetCommonShaderHeaderHLSLBottom()
         }
 
         // Returns the perceptual brightness of an RGB color using standard luminance weights.
-        float GetLuma(float3 rgb)
-        {
+        float GetLuma(float3 rgb) {
             return dot(rgb, float3(0.299, 0.587, 0.114));
         }
 
         // Performs a three-way linear interpolation across a color gradient (a to b to c).
-        float3 Lerp3(float3 a, float3 b, float3 c, float t)
-        {
+        float3 Lerp3(float3 a, float3 b, float3 c, float t) {
             if (t < 0.5) return lerp(a, b, t * 2.0);
             return lerp(b, c, (t - 0.5) * 2.0);
         }
@@ -279,17 +315,14 @@ std::string GetCommonShaderHeaderHLSLBottom()
         // --- Other helpers ---
 
         // ditherValue: 0 to 100 (0 = fully opaque, 100 = fully transparent)
-        void transparentDither(uint2 pixelPos, float transparency)
-        {
+        void transparentDither(uint2 pixelPos, float transparency) {
             // A simple 2x2 checkerboard logic
             // This creates the "grain" look
             bool checker = ((pixelPos.x + pixelPos.y) % 2 == 0);
-            
             // For 50% transparency (your sweet spot)
             if (transparency >= 50.0) {
                 if (checker) discard;
             }
-            
             // For higher transparency (like your 97% ghost shader)
             // We add an extra skip to thin out the remaining 50%
             if (transparency > 75.0) {
@@ -297,98 +330,50 @@ std::string GetCommonShaderHeaderHLSLBottom()
             }
         }
 
-        float2 GetWindDir()
-        {
+        float2 GetWindDir() {
             float s, c;
             // Using sincos to transform your scalar angle into a 2D vector
             sincos(GFXInjected[0].g_WindAngle, s, c);
             return float2(c, s);
         }
 
-        float2 GetWindFlow(float speedMult)
-        {
+        float2 GetWindFlow(float speedMult) {
             return GetWindDir() * (GFXInjected[0].g_Time * GFXInjected[0].g_WindSpeed * speedMult);
         }
 
         // --- Math Helpers ---
 
         // Produces a static, deterministic pseudo-random value based strictly on UV coordinates.
-        float RandomHash(float2 uv)
-        {
+        float RandomHash(float2 uv) {
             return frac(sin(dot(uv, float2(12.9898, 78.233))) * 43758.5453);
         }
 
         // Produces a dynamic pseudo-random value that changes every frame using the injected random seed.
-        float RandomTemporal(float2 uv)
-        {
+        float RandomTemporal(float2 uv) {
             return frac(sin(dot(uv + GFXInjected[0].g_Random, float2(12.9898, 78.233))) * 43758.5453);
         }
 
         // Maps a numeric value from an input range [min1, max1] to an output range [min2, max2].
-        float Remap(float value, float min1, float max1, float min2, float max2)
-        {
+        float Remap(float value, float min1, float max1, float min2, float max2) {
             return min2 + (value - min1) * (max2 - min2) / (max1 - min1);
         }
 
         // Converts a non-linear raw depth buffer value into a linear 0.0 to 1.0 distance.
         float GetLinearDepth(float rawDepth) {
-            // We reconstruct a point at the center of the screen at the given depth
+            // clip = (ndc.x=0, ndc.y=0, ndc.z=rawDepth, w=1)
             float4 clipPos = float4(0, 0, rawDepth, 1.0);
             float4x4 invProj = float4x4(
-                GFXInjected[0].g_InvProjRow0,
-                GFXInjected[0].g_InvProjRow1,
-                GFXInjected[0].g_InvProjRow2,
-                GFXInjected[0].g_InvProjRow3
+            GFXInjected[0].g_InvProjMatrixRow0,
+            GFXInjected[0].g_InvProjMatrixRow1,
+            GFXInjected[0].g_InvProjMatrixRow2,
+            GFXInjected[0].g_InvProjMatrixRow3
             );
             float4 viewPos = mul(clipPos, invProj);
-            // The W component after inverse projection is actually the Linear Eye Depth!
-            return viewPos.w; 
-        }
-
-        // Calculates UV offsets to simulate surface depth/relief without requiring extra geometry.
-        float2 ApplyParallax(float2 uv, float3 viewDirTS, float3 worldPos, float scale, Texture2D heightMap, SamplerState sam) {
-            // Distance Culling
-            float dist = distance(worldPos, GFXInjected[0].g_CameraPos);
-            if (dist > 2000.0) return uv; 
-
-            // Initial Height
-            float h = heightMap.SampleLevel(sam, uv, 0.5).y;
-            
-            // Anchor the scale to the angle
-            // We use (1 - viewDirTS.z) to make sure top-down views have ZERO shift.
-            float angleFactor = saturate(1.0 - viewDirTS.z);
-            float finalScale = scale * angleFactor * saturate((h - 0.2) / 0.5);
-
-            // THE PROJECTED OFFSET
-            // We multiply by xy and ignore the division.
-            float2 maxOffset = viewDirTS.xy * finalScale;
-
-            // The Search Loop
-            const float numSteps = 12.0;
-            float2 uvStep = maxOffset / numSteps;
-            float stepSize = 1.0 / numSteps;
-            
-            float2 currentUV = uv;
-            float currentLayerDepth = 0.0;
-            float prevHeight = h;
-
-            [loop]
-            for(int i = 0; i < 12; i++) {
-                // Sample at Mip 1.0 to smoothen the turret edges
-                float currentHeight = heightMap.SampleLevel(sam, currentUV, 1.0).y;
-                if(currentLayerDepth < currentHeight) {
-                    prevHeight = currentHeight;
-                    currentUV -= uvStep;
-                    currentLayerDepth += stepSize;
-                } else {
-                    float nextHeight = currentHeight;
-                    float prevLayerDepth = currentLayerDepth - stepSize;
-                    float weight = (currentLayerDepth - nextHeight) / (abs((nextHeight - prevHeight) + (prevLayerDepth - currentLayerDepth)) + 1e-6);
-                    return lerp(currentUV, currentUV + uvStep, weight);
-                }
-            }
-
-            return currentUV;
+            viewPos /= viewPos.w; // important
+            // Now viewPos.z is the view-space z. Return signed or absolute depending on convention:
+            // If camera looks along -Z: return -viewPos.z;
+            // If camera looks along +Z: return viewPos.z;
+            return abs(viewPos.z);
         }
         )");
 }

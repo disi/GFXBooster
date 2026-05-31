@@ -13,11 +13,11 @@ std::shared_ptr<spdlog::logger> gLog;
 namespace Version
 {
     inline constexpr std::size_t MAJOR = 0;
-    inline constexpr std::size_t MINOR = 1;
-    inline constexpr std::size_t PATCH = 5;
-    inline constexpr auto NAME = "0.1.5"sv;
+    inline constexpr std::size_t MINOR = 2;
+    inline constexpr std::size_t PATCH = 2;
+    inline constexpr auto NAME = "0.2.2"sv;
     inline constexpr auto AUTHORNAME = "disi"sv;
-    inline constexpr auto PROJECT = "GFXBoosterCL"sv;
+    inline constexpr auto PROJECT = "ShaderEngineCL"sv;
 } // namespace Version
 
 
@@ -36,11 +36,11 @@ RE::TESDataHandler *g_dataHandle = 0;
 
 // Variables
 // Global Module Name
-std::string g_moduleName = "GFXBoosterCL.dll";
+std::string g_moduleName = "ShaderEngineCL.dll";
 // Global INI Name
-std::string g_iniName = "GFXBoosterCL.ini";
+std::string g_iniName = "ShaderEngine.ini";
 // Global Log Name
-std::string g_logName = "GFXBoosterCL.log";
+std::string g_logName = "ShaderEngine.log";
 // Global plugin path
 std::filesystem::path g_pluginPath;
 // Shader folder path for loading custom shaders and watching for changes in development mode
@@ -49,6 +49,8 @@ std::filesystem::path g_shaderFolderPath;
 bool DEBUGGING = false;
 // Custom buffer update flag
 bool CUSTOMBUFFER_ON = true;
+// Custom depth SRV slot in shader
+UINT DEPTHBUFFER_SLOT = 30;
 // Custom resource view slot in shader
 UINT CUSTOMBUFFER_SLOT = 14;
 // Shader settings menu flag
@@ -508,7 +510,7 @@ int LoadShaderDefinitionsFromFile(const std::filesystem::path& shaderFolderPath,
             // Cache the ShaderDefinition ID
             std::string shaderID = def.id;
             if (!hasCachedShaderID) {
-                cachedShaderID = shaderID;
+                cachedShaderID = folderName;
                 hasCachedShaderID = true;
             }
             // Add the definition to global list
@@ -701,6 +703,15 @@ void LoadConfig(HMODULE hModule) {
             REX::INFO("LoadConfig: CUSTOMBUFFER_ON set to {}", CUSTOMBUFFER_ON);
             continue;
         }
+        else if (lowerKey == "depthbuffer_slot") {
+            try {
+                DEPTHBUFFER_SLOT = static_cast<UINT>(std::stoi(value));
+                REX::INFO("LoadConfig: DEPTHBUFFER_SLOT set to {}", DEPTHBUFFER_SLOT);
+            } catch (...) {
+                REX::WARN("LoadConfig: Invalid DEPTHBUFFER_SLOT value: {}. Using default: {}", value, DEPTHBUFFER_SLOT);
+            }
+            continue;
+        }
         else if (lowerKey == "custombuffer_slot") {
             try {
                 CUSTOMBUFFER_SLOT = static_cast<UINT>(std::stoi(value));
@@ -811,7 +822,7 @@ void LoadConfig(HMODULE hModule) {
     file.close();
     // Scan for shader definitions in subdirectories
     if (g_shaderFolderPath.empty()) {
-        g_shaderFolderPath = configPath.parent_path() / "GFXBooster";
+        g_shaderFolderPath = configPath.parent_path() / "ShaderEngine";
     }
     REX::INFO("LoadConfig: Scanning for shaders in: {}", g_shaderFolderPath.string());
     auto shaderFolders = GetSubdirectories(g_shaderFolderPath);
@@ -843,7 +854,7 @@ void LoadConfig(HMODULE hModule) {
     g_commonShaderHeaderPath = g_shaderFolderPath / "Include";
     } catch (...) {
         // Fallback if canonical fails
-        g_commonShaderHeaderPath = configPath.parent_path() / "Plugins" / "GFXBooster" / "Include";
+        g_commonShaderHeaderPath = configPath.parent_path() / "Plugins" / "ShaderEngine" / "Include";
     }
     if (DEBUGGING) {
         REX::INFO("LoadConfig: Setting global shader include path for D3DCompile to: {}", g_commonShaderHeaderPath.string());
@@ -869,7 +880,7 @@ void ReloadAllShaderDefinitions_Internal() {
     g_shaderDefinitions.Clear();  // Deletes old definitions
     // Build a new ShaderDefDB from the INI files on disk
     if (g_shaderFolderPath.empty()) {
-        g_shaderFolderPath = g_pluginPath / "GFXBooster";
+        g_shaderFolderPath = g_pluginPath / "ShaderEngine";
     }
     auto shaderFolders = GetSubdirectories(g_shaderFolderPath);
     for (const auto& folderPath : shaderFolders) {

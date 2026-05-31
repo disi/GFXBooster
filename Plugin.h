@@ -30,36 +30,49 @@ struct alignas(16) GFXBoosterAccessData
     float windAngle;   
     float windTurb;    // 11
 
-    float vpLeft;      // 12
-    float vpTop;       
-    float vpWidth;     
-    float vpHeight;    // 15
+    DirectX::XMFLOAT4 viewPort;   // 12
 
-    float camX;        // 16
+    float camX;        // 13
     float camY;        
     float camZ;        
-    float pRadDmg;     // 19
+    float pRadDmg;     // 14
 
-    float viewDirX;    // 20
+    float viewDirX;    // 15
     float viewDirY;    
     float viewDirZ;    
+    float random;    // 16
 
-    float pHealthPerc; // 23
-    DirectX::XMFLOAT4 g_InvProjRow0; // 24
-    DirectX::XMFLOAT4 g_InvProjRow1; // 25
-    DirectX::XMFLOAT4 g_InvProjRow2; // 26
-    DirectX::XMFLOAT4 g_InvProjRow3; // 27
+    float  inCombat;     // 17
+    float  inInterior;   // 18
+    float _padding;   // 19
+    float pHealthPerc; // 20
 
-    float random;    // 28
-    float  inCombat;     // 29
-    float  inInterior;   // 30
-    float _padding;   // 31
+    DirectX::XMFLOAT4 g_ViewMatrixRow0; // 21
+    DirectX::XMFLOAT4 g_ViewMatrixRow1; // 22
+    DirectX::XMFLOAT4 g_ViewMatrixRow2; // 23
+    DirectX::XMFLOAT4 g_ViewMatrixRow3; // 24
 
-    // Forward view-projection rows (needed for SSR world → clip reprojection)
-    DirectX::XMFLOAT4 g_ViewProjRow0; // 32
-    DirectX::XMFLOAT4 g_ViewProjRow1; // 33
-    DirectX::XMFLOAT4 g_ViewProjRow2; // 34
-    DirectX::XMFLOAT4 g_ViewProjRow3; // 35
+    DirectX::XMFLOAT4 g_ProjMatrixRow0; // 25
+    DirectX::XMFLOAT4 g_ProjMatrixRow1; // 26
+    DirectX::XMFLOAT4 g_ProjMatrixRow2; // 27
+    DirectX::XMFLOAT4 g_ProjMatrixRow3; // 28
+
+    DirectX::XMFLOAT4 g_ViewProjMatrixRow0; // 29
+    DirectX::XMFLOAT4 g_ViewProjMatrixRow1; // 30
+    DirectX::XMFLOAT4 g_ViewProjMatrixRow2; // 31
+    DirectX::XMFLOAT4 g_ViewProjMatrixRow3; // 32
+
+    DirectX::XMFLOAT4 g_InvViewProjMatrixRow0; // 33
+    DirectX::XMFLOAT4 g_InvViewProjMatrixRow1; // 34
+    DirectX::XMFLOAT4 g_InvViewProjMatrixRow2; // 35
+    DirectX::XMFLOAT4 g_InvViewProjMatrixRow3; // 36
+
+    DirectX::XMFLOAT4 g_InvProjMatrixRow0; // 37
+    DirectX::XMFLOAT4 g_InvProjMatrixRow1; // 38
+    DirectX::XMFLOAT4 g_InvProjMatrixRow2; // 39
+    DirectX::XMFLOAT4 g_InvProjMatrixRow3; // 40
+
+    DirectX::XMFLOAT2 g_ViewDepthRange; // 41
 
     // Shader settings — offset tracked automatically via kCustomBase = offsetof(..., modularFloats)
     float    modularFloats[200]; // 4 bytes each, 800 bytes total
@@ -84,15 +97,6 @@ struct ShaderValue {
         bool b;
     } current, min, max, step, def;
     uint32_t bufferIndex = 0; // The slot index (0-199 for floats, etc.)
-    // Helper to get the byte offset within the SRV buffer based on type and index
-    //uint32_t GetByteOffset() const {
-    //    switch (type) {
-    //    case Type::Float: return kCustomBase + bufferIndex * 4;
-    //    case Type::Int:   return kCustomBase + 800 + bufferIndex * 4;
-    //    case Type::Bool:  return kCustomBase + 1200 + bufferIndex * 4;
-    //    default:          return 0;
-    //    }
-    //}
 };
 
 // Global shader settings holder
@@ -140,7 +144,7 @@ public:
     }
     // Save the current shader settings values to a file (e.g. JSON or INI)
     void SaveSettings() {
-        std::filesystem::path settingsPath = g_pluginPath / "GFXBoosterCLShaderSettings.ini";
+        std::filesystem::path settingsPath = g_pluginPath / "ShaderEngineShaderSettings.ini";
         std::ofstream file(settingsPath, std::ios::out);
         // Save global shader values
         file << "; Global Shader Values\n";
@@ -197,7 +201,7 @@ public:
     }
     // Load shader settings values from a file and update the current values
     void LoadSettings() {
-        std::filesystem::path settingsPath = g_pluginPath / "GFXBoosterCLShaderSettings.ini";
+        std::filesystem::path settingsPath = g_pluginPath / "ShaderEngineShaderSettings.ini";
         std::ifstream file(settingsPath, std::ios::in);
         // Read the entire file into a string for easier parsing
         std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());

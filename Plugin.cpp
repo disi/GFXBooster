@@ -8,10 +8,10 @@ RE::BSGraphics::RendererData* g_rendererData = nullptr;
 RE::PlayerCharacter* g_player = nullptr;
 RE::ActorValue* g_actorValueInfo = nullptr;
 RE::Sky* g_sky = nullptr;
+RE::PlayerCamera* g_playerCamera = nullptr;
+RE::Calendar* g_calendar = nullptr;
 // Global Shader DB
 ShaderDB g_ShaderDB = {};
-// Global trackers of current shader
-int g_currentTextureDSIndices[128] = { -1 }; 
 // Tell MyCreatePixelShader to skip analysing the shader when creating replacement shaders to avoid infinite recursion
 bool g_isCreatingReplacementShader = false;
 // Global custom buffer data structure instance for updating CB13
@@ -65,8 +65,14 @@ HRESULT STDMETHODCALLTYPE MyPresent(
     REX::W32::IDXGISwapChain* This,
     UINT SyncInterval,
     UINT Flags) {
+    // Release the depth SRV at the start of each frame so we can bind a new one next frame
+    if (g_depthSRV) {
+        g_depthSRV->Release();
+        g_depthSRV = nullptr;
+    }
+    // Update the custom buffer with game data
     if (CUSTOMBUFFER_ON) {
-        UpdateCustomBuffer_Internal();  // Update CB13
+        UpdateCustomBuffer_Internal();
     }
     // Always draw a frame if ImGui is initialized to allow hotkeys
     if (g_imguiInitialized) {
@@ -88,9 +94,33 @@ HRESULT STDMETHODCALLTYPE MyPresent(
     if (g_imguiInitialized && DEVGUI_ON && g_showSettings) {
         UIDrawShaderDebugOverlay();
     }
+    //if (g_imguiInitialized) {
+        //ImGui::Render();
+        //ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    //}
     if (g_imguiInitialized) {
+        // Render the ImGui frame
         ImGui::Render();
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        // Get the back buffer from the swap chain
+        GUID iid = __uuidof(REX::W32::ID3D11Texture2D);
+        REX::W32::GUID iidREX;
+        static_assert(sizeof(iidREX) == sizeof(iid), "GUID sizes must match");
+        std::memcpy(&iidREX, &iid, sizeof(iidREX));
+        REX::W32::ID3D11Texture2D* backBuffer = nullptr;
+        // Set the render target to the back buffer and render ImGui on top of the game frame
+        if (SUCCEEDED(This->GetBuffer(0, iidREX, reinterpret_cast<void**>(&backBuffer)))) {
+            // use the games device/context (cast to native interfaces)
+            REX::W32::ID3D11Device* nativeDev = reinterpret_cast<REX::W32::ID3D11Device*>(g_rendererData->device);
+            REX::W32::ID3D11DeviceContext* nativeCtx = reinterpret_cast<REX::W32::ID3D11DeviceContext*>(g_rendererData->context);
+            REX::W32::ID3D11RenderTargetView* rtv = nullptr;
+            if (SUCCEEDED(nativeDev->CreateRenderTargetView(backBuffer, nullptr, &rtv))) {
+                nativeCtx->OMSetRenderTargets(1, &rtv, nullptr);
+                ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+                rtv->Release();
+            }
+            // Release the back buffer
+            backBuffer->Release();
+        }
     }
     return OriginalPresent(This, SyncInterval, Flags);
 }
@@ -124,6 +154,10 @@ void STDMETHODCALLTYPE MyPSSetShader(
                 if (g_customSRV) {
                     This->PSSetShaderResources(CUSTOMBUFFER_SLOT, 1, &g_customSRV);
                 }
+                // Set the depth SRV for replacement shaders to use in their shader code when DEPTHBUFFER_ON is enabled
+                if (g_depthSRV) {
+                    This->PSSetShaderResources(DEPTHBUFFER_SLOT, 1, &g_depthSRV);
+                }
             } else {
                 auto* matchedDefinition = g_ShaderDB.GetMatchedDefinition(pPixelShader);
                 if (matchedDefinition && !matchedDefinition->buggy) {
@@ -141,6 +175,10 @@ void STDMETHODCALLTYPE MyPSSetShader(
                         // Set our custom SRV for replacement shaders to use in their shader code
                         if (g_customSRV) {
                             This->PSSetShaderResources(CUSTOMBUFFER_SLOT, 1, &g_customSRV);
+                        }
+                        // Set the depth SRV for replacement shaders to use in their shader code when DEPTHBUFFER_ON is enabled
+                        if (g_depthSRV) {
+                            This->PSSetShaderResources(DEPTHBUFFER_SLOT, 1, &g_depthSRV);
                         }
                     } else {
                         REX::WARN("MyPSSetShader: Failed to compile replacement shader for definition '{}'", matchedDefinition->id);
@@ -211,6 +249,89 @@ void STDMETHODCALLTYPE MyVSSetShader(
     }
     // Call original function with either the original or replacement shader
     OriginalVSSetShader(This, pVertexShader, ppClassInstances, NumClassInstances);
+}
+
+// Hook for ID3D11DeviceContext::PSSetShaderResources to track currently set shader resource views (for dumping and potential use in shader replacement)
+using PSSetShaderResources_t = void(STDMETHODCALLTYPE*)(
+    REX::W32::ID3D11DeviceContext* This,
+    UINT StartSlot,
+    UINT NumViews,
+    REX::W32::ID3D11ShaderResourceView* const* ppShaderResourceViews);
+PSSetShaderResources_t OriginalPSSetShaderResources = nullptr;
+void STDMETHODCALLTYPE MyPSSetShaderResources(
+    REX::W32::ID3D11DeviceContext* This,
+    UINT StartSlot,
+    UINT NumViews,
+    REX::W32::ID3D11ShaderResourceView* const* ppShaderResourceViews) {
+    // Early exit if we already have the depth SRV
+    if (g_depthSRV) {
+        OriginalPSSetShaderResources(This, StartSlot, NumViews, ppShaderResourceViews);
+        return;
+    }
+    // We check the first 4 slots to see if we can identify the depth buffer being bound. It is usually slot 3.
+    for (UINT i = 0; i < NumViews && StartSlot + i < 4; ++i) {
+        auto* srv = ppShaderResourceViews[i];
+        // Skip if null or if it's already our stored depth SRV to avoid redundant checks
+        if (!srv || srv == g_depthSRV) continue;
+        // Get the resource from the SRV
+        REX::W32::ID3D11Resource* resource = nullptr;
+        srv->GetResource(&resource);
+        if (resource) {
+            // check if it is full screen (depth buffers are usually full screen)
+            REX::W32::D3D11_RESOURCE_DIMENSION resDim;
+            resource->GetType(&resDim);
+            if (resDim != REX::W32::D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+                resource->Release();
+                continue; // Not a texture2D, skip
+            }
+            // Check texture resolution to see if it matches the screen resolution (depth buffers are usually full screen)
+            REX::W32::D3D11_TEXTURE2D_DESC desc;
+            REX::W32::ID3D11Texture2D* texture = nullptr;
+            //QueryInterface(*reinterpret_cast<const IID*>(&__uuidof(T)), static_cast<void**>(a_object));
+            HRESULT hr = resource->QueryInterface(reinterpret_cast<const REX::W32::IID&>(__uuidof(REX::W32::ID3D11Texture2D)), reinterpret_cast<void**>(&texture));
+            if (SUCCEEDED(hr) && texture) {
+                texture->GetDesc(&desc);
+                // Check the bind flags to see if it has depth stencil usage (depth buffers usually have this flag)
+                if ((desc.bindFlags & REX::W32::D3D11_BIND_DEPTH_STENCIL) == 0) {
+                    texture->Release();
+                    resource->Release();
+                    if (DEBUGGING)
+                        REX::INFO("MyPSSetShaderResources: Skipping SRV at slot {} as it does not have depth stencil bind flags. Bind flags: {}", StartSlot + i, desc.bindFlags);
+                    continue; // Not a depth stencil, skip
+                }
+                if (desc.width < (g_customBufferData.resX - 100) || desc.height < (g_customBufferData.resY - 100) || desc.width > (g_customBufferData.resX + 100) || desc.height > (g_customBufferData.resY + 100)) {
+                    texture->Release();
+                    resource->Release();
+                    if (DEBUGGING)
+                        REX::INFO("MyPSSetShaderResources: Skipping SRV at slot {} with resolution {}x{} as it's smaller or larger than screen resolution {}x{}.", StartSlot + i, desc.width, desc.height, g_customBufferData.resX, g_customBufferData.resY);
+                    continue; // Resolution too low, skip
+                }
+                // If it has a depth format, it's very likely the depth buffer
+                if (desc.format == REX::W32::DXGI_FORMAT_R24G8_TYPELESS) {
+                    // Store the depth SRV globally for shaders to read from when DEPTHBUFFER_ON is enabled
+                    if (srv != g_depthSRV) {
+                        if (g_depthSRV) g_depthSRV->Release();
+                        srv->AddRef();
+                        if (DEBUGGING)
+                            REX::INFO("MyPSSetShaderResources: Detected depth buffer SRV bound to slot {}, storing for shader access. Bind flags: {}", StartSlot + i, desc.bindFlags);
+                        g_depthSRV = srv;
+                    }
+                    break; // Found the depth buffer, no need to check further
+                } else {
+                    if (DEBUGGING)
+                        REX::INFO("MyPSSetShaderResources: Skipping SRV at slot {} with format {} as it's not a depth format.", StartSlot + i, static_cast<int>(desc.format));
+                }
+                texture->Release();
+            } else {
+                resource->Release();
+                if (DEBUGGING)
+                    REX::WARN("MyPSSetShaderResources: Failed to query texture2D interface for SRV at slot {}, HRESULT: 0x{:X}", StartSlot + i, hr);
+                continue; // Not a texture2D, skip
+            }
+            resource->Release();
+        }
+    }
+    OriginalPSSetShaderResources(This, StartSlot, NumViews, ppShaderResourceViews);
 }
 
 // --- SHADER CREATION ---
@@ -622,7 +743,7 @@ void DumpOriginalShader_Internal(ShaderDBEntry const& entry, ShaderDefinition* d
                                   outputCount=entry.outputCount,
                                   outputMask=entry.outputMask,
                                   def](){
-            std::filesystem::path dumpPath = g_pluginPath / "GFXBoosterDumps" / def->id;
+            std::filesystem::path dumpPath = g_pluginPath / "ShaderEngineDumps" / def->id;
             std::filesystem::create_directories(dumpPath);
             if (def->dump && !bytecode.empty()) {
                 std::string binFilename = std::format("{}.bin", shaderUID);
@@ -940,7 +1061,7 @@ void UIDrawShaderSettingsOverlay() {
     // Make background semi-transparent
     ImGui::SetNextWindowBgAlpha(SHADERSETTINGS_OPACITY);
     // Create the Window
-    ImGui::Begin("GFXBooster Settings");
+    ImGui::Begin("ShaderEngine Settings");
     // Render a row for each shader value with appropriate control based on type
     auto renderRow = [&](ShaderValue &sValue) {
         ImGui::PushID(sValue.id.c_str());
@@ -949,16 +1070,22 @@ void UIDrawShaderSettingsOverlay() {
                 if (ImGui::Checkbox(sValue.label.c_str(), &sValue.current.b)) {
                     /* value changed if you need to react */
                 }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("R")) { sValue.current.b = sValue.def.b; /* reset to default */ }
                 break;
             case ShaderValue::Type::Int:
                 if (ImGui::SliderInt(sValue.label.c_str(), &sValue.current.i, sValue.min.i, sValue.max.i)) {
                     /* value changed */
                 }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("R")) { sValue.current.i = sValue.def.i; /* reset to default */ }
                 break;
             case ShaderValue::Type::Float:
                 if (ImGui::SliderFloat(sValue.label.c_str(), &sValue.current.f, sValue.min.f, sValue.max.f, "%.3f", ImGuiSliderFlags_AlwaysClamp)) {
                     /* value changed */
                 }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("R")) { sValue.current.f = sValue.def.f; /* reset to default */ }
                 break;
         }
         ImGui::PopID();
@@ -1005,7 +1132,7 @@ void UIDrawShaderDebugOverlay() {
     // Make background semi-transparent
     ImGui::SetNextWindowBgAlpha(DEVGUI_OPACITY);
     // Create the Window
-    ImGui::Begin("GFXBooster Shader Monitor");
+    ImGui::Begin("ShaderEngine Monitor");
     // Tickboxes for showing replaced shaders and locking the shader list
     ImGui::SameLine(ImGui::GetWindowWidth() - 240);
     ImGui::Checkbox("Replaced", &g_showReplaced);
@@ -1139,6 +1266,16 @@ void UIUnlockShaderList_Internal() {
 
 // Update the custom buffer for shaders
 void UpdateCustomBuffer_Internal() {
+    // Get the current game hour
+    if (!g_calendar) {
+        g_calendar = RE::Calendar::GetSingleton();
+    }
+    // dayCycle 0.0-1.0
+    float dayCycle;
+    if (g_calendar) {
+        float gameHour = g_calendar->gameHour->value;
+        dayCycle = gameHour / 24.0f;
+    }
     // Fill the custom buffer data structure with current frame info
     static LARGE_INTEGER frequency = {};
     static LARGE_INTEGER lastFrameTime = {};
@@ -1176,11 +1313,9 @@ void UpdateCustomBuffer_Internal() {
     }
     // Get screen resolution from the main render target
     float resX = 1920.0f, resY = 1080.0f;
-    if (g_rendererData->renderTargets[0].texture) {
-        REX::W32::D3D11_TEXTURE2D_DESC desc{};
-        g_rendererData->renderTargets[0].texture->GetDesc(&desc);
-        resX = static_cast<float>(desc.width);
-        resY = static_cast<float>(desc.height);
+    if (g_rendererData->renderWindow) {
+        resX = g_rendererData->renderWindow->windowWidth;
+        resY = g_rendererData->renderWindow->windowHeight;
     }
     // Get mouse position (normalized to 0.0 - 1.0)
     POINT mousePos{};
@@ -1188,26 +1323,29 @@ void UpdateCustomBuffer_Internal() {
     ScreenToClient(GetActiveWindow(), &mousePos);
     float mousePosX = static_cast<float>(mousePos.x) / resX;
     float mousePosY = static_cast<float>(mousePos.y) / resY;
-    // Get the viewport data to extract the camera position and forward vector
-    auto gfxState = RE::BSGraphics::State::GetSingleton();
-    auto& camState = gfxState.cameraState;        // CameraStateData
-    auto& camView  = camState.camViewData;        // viewMat, viewDir, viewUp, viewRight, viewPort
-    // viewport
-    auto vp = camView.viewPort;
-    float vpX = vp.left, vpY = vp.top;
-    float vpW = vp.right - vp.left, vpH = vp.bottom - vp.top;
-    // forward vector -> yaw/pitch
-    auto vd = camView.viewDir;
-    float vx = vd.m128_f32[0], vy = vd.m128_f32[1], vz = vd.m128_f32[2];
-    // world-space camera position (from view matrix)
-    auto& VM = camView.viewMat; // __m128 viewMat[4]
-    float tx = VM[3].m128_f32[0], ty = VM[3].m128_f32[1], tz = VM[3].m128_f32[2];
-    float m00 = VM[0].m128_f32[0], m10 = VM[1].m128_f32[0], m20 = VM[2].m128_f32[0];
-    float m01 = VM[0].m128_f32[1], m11 = VM[1].m128_f32[1], m21 = VM[2].m128_f32[1];
-    float m02 = VM[0].m128_f32[2], m12 = VM[1].m128_f32[2], m22 = VM[2].m128_f32[2];
-    float camX = -(m00*tx + m10*ty + m20*tz);
-    float camY = -(m01*tx + m11*ty + m21*tz);
-    float camZ = -(m02*tx + m12*ty + m22*tz);
+    // Get the Player Camera position and rotation
+    if (!g_playerCamera) {
+        g_playerCamera = RE::PlayerCamera::GetSingleton();
+    }
+    RE::NiPoint3 camPos;
+    RE::NiQuaternion camRot;
+    if (g_playerCamera && g_playerCamera->currentState) {
+        // position (world)
+        g_playerCamera->currentState->GetTranslation(camPos);
+        // rotation (world)
+        g_playerCamera->currentState->GetRotation(camRot);
+    }
+    // forward vector from camera rotation (convert quaternion to forward vector)
+    DirectX::XMVECTOR q = DirectX::XMVectorSet(camRot.x, camRot.y, camRot.z, camRot.w);
+    q = DirectX::XMQuaternionNormalize(q);
+    // rotate engine forward (use +Z or -Z depending on convention)
+    DirectX::XMVECTOR forward = DirectX::XMVector3Rotate(DirectX::XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f), q);
+    // store normalized forward
+    DirectX::XMFLOAT3 camfwd;
+    // Get a random number each frame
+    float randomValue = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
+    DirectX::XMStoreFloat3(&camfwd, DirectX::XMVector3Normalize(forward));
+    // Cache some slower-updating values every 30 frames to avoid expensive queries every frame
     if (!g_player)
         g_player = RE::PlayerCharacter::GetSingleton();
     if (!g_actorValueInfo)
@@ -1238,6 +1376,7 @@ void UpdateCustomBuffer_Internal() {
             g_windSpeed = g_sky->windSpeed;
             g_windAngle = g_sky->windAngle;
             g_windTurbulence = g_sky->windTurbulence;
+            g_sky->atmosphere;
         }
         // Check if the player is in combat
         if (g_player)
@@ -1247,19 +1386,35 @@ void UpdateCustomBuffer_Internal() {
             g_inInterior = g_player->GetParentCell()->IsInterior();
         }
     }
-    // Get the Projection Inverse matrix to extract the camera FOV
+    // View matrix (we can use this stale snapshot to calculate the matrices)
+    auto gfxState = RE::BSGraphics::State::GetSingleton();
+    // Initialize with defaults
+    auto camView = gfxState.cameraState.camViewData;
+    // Check if the 
+    for (const auto& camState : gfxState.cameraDataCache) {
+        if (camState.referenceCamera && camState.camViewData.viewPort.right > 0.0f) {
+            camView = camState.camViewData;
+            break;
+        }
+    }
+    // Get the fields
+    RE::NiRect<float> viewPort = camView.viewPort;
+    DirectX::XMFLOAT4 vp = DirectX::XMFLOAT4(viewPort.left, viewPort.top, viewPort.right, viewPort.bottom);
+    RE::NiPoint2 viewDepthRange = camView.viewDepthRange;
+    DirectX::XMFLOAT2 depthRange = DirectX::XMFLOAT2(viewDepthRange.x, viewDepthRange.y);
+    auto& VM = camView.viewMat; // __m128 viewMat[4]
+    DirectX::XMMATRIX viewMatrix = DirectX::XMMATRIX(VM[0], VM[1], VM[2], VM[3]);
     auto& PM = camView.projMat; // __m128 projMat[4]
-    DirectX::XMMATRIX proj = DirectX::XMMATRIX(PM[0], PM[1], PM[2], PM[3]);   // load into XMMATRIX
-    DirectX::XMMATRIX invProj = DirectX::XMMatrixInverse(nullptr, proj);
-    // Get the View Projection matrix
-    DirectX::XMMATRIX view = DirectX::XMMATRIX(VM[0], VM[1], VM[2], VM[3]);
-    DirectX::XMMATRIX viewProj = DirectX::XMMatrixMultiply(view, proj);
-    // Get a random number each frame
-    float randomValue = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
+    DirectX::XMMATRIX projMatrix = DirectX::XMMATRIX(PM[0], PM[1], PM[2], PM[3]);
+    auto& VP = camView.viewProjMat; // __m128 viewProjMat[4]
+    DirectX::XMMATRIX viewProjMatrix = DirectX::XMMATRIX(VP[0], VP[1], VP[2], VP[3]);
+    DirectX::XMMATRIX invViewProjMatrix = DirectX::XMMatrixInverse(nullptr, viewProjMatrix);
+    auto& IP = camView.inv1stPersonProjMat; // __m128 invProjMat[4]
+    DirectX::XMMATRIX invProjMatrix = DirectX::XMMATRIX(IP[0], IP[1], IP[2], IP[3]);
     // Fill the custom buffer data structure
     g_customBufferData.time     = totalTime;
     g_customBufferData.delta    = deltaTime;
-    g_customBufferData.dayCycle = fmodf(totalTime, 86400.0f) / 86400.0f;
+    g_customBufferData.dayCycle = dayCycle;
     g_customBufferData.frame    = static_cast<float>(frameCounter++);
     g_customBufferData.fps      = smoothedFPS;
     g_customBufferData.resX     = resX;
@@ -1269,30 +1424,40 @@ void UpdateCustomBuffer_Internal() {
     g_customBufferData.windSpeed = g_windSpeed;
     g_customBufferData.windAngle = g_windAngle;
     g_customBufferData.windTurb  = g_windTurbulence;
-    g_customBufferData.vpLeft   = vp.left;
-    g_customBufferData.vpTop    = vp.top;
-    g_customBufferData.vpWidth  = vp.right - vp.left;
-    g_customBufferData.vpHeight = vp.bottom - vp.top;
-    g_customBufferData.camX     = camX;
-    g_customBufferData.camY     = camY;
-    g_customBufferData.camZ     = camZ;
+    g_customBufferData.viewPort   = vp;
+    g_customBufferData.camX     = camPos.x;
+    g_customBufferData.camY     = camPos.y;
+    g_customBufferData.camZ     = camPos.z;
     g_customBufferData.pRadDmg  = g_radDmg;
-    g_customBufferData.viewDirX = vd.m128_f32[0];
-    g_customBufferData.viewDirY = vd.m128_f32[1];
-    g_customBufferData.viewDirZ = vd.m128_f32[2];
-    g_customBufferData.pHealthPerc = g_healthPerc;
-    DirectX::XMStoreFloat4(&g_customBufferData.g_InvProjRow0, invProj.r[0]);
-    DirectX::XMStoreFloat4(&g_customBufferData.g_InvProjRow1, invProj.r[1]);
-    DirectX::XMStoreFloat4(&g_customBufferData.g_InvProjRow2, invProj.r[2]);
-    DirectX::XMStoreFloat4(&g_customBufferData.g_InvProjRow3, invProj.r[3]);
+    g_customBufferData.viewDirX = camfwd.x;
+    g_customBufferData.viewDirY = camfwd.y;
+    g_customBufferData.viewDirZ = camfwd.z;
     g_customBufferData.random  = randomValue;
     g_customBufferData.inCombat = g_inCombat ? 1.0f : 0.0f;
     g_customBufferData.inInterior = g_inInterior ? 1.0f : 0.0f;
     g_customBufferData._padding = 0.0f; // just in case, to avoid any potential uninitialized data issues in shaders
-    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewProjRow0, viewProj.r[0]);
-    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewProjRow1, viewProj.r[1]);
-    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewProjRow2, viewProj.r[2]);
-    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewProjRow3, viewProj.r[3]);
+    g_customBufferData.pHealthPerc = g_healthPerc;
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewMatrixRow0, viewMatrix.r[0]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewMatrixRow1, viewMatrix.r[1]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewMatrixRow2, viewMatrix.r[2]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewMatrixRow3, viewMatrix.r[3]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ProjMatrixRow0, projMatrix.r[0]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ProjMatrixRow1, projMatrix.r[1]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ProjMatrixRow2, projMatrix.r[2]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ProjMatrixRow3, projMatrix.r[3]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewProjMatrixRow0, viewProjMatrix.r[0]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewProjMatrixRow1, viewProjMatrix.r[1]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewProjMatrixRow2, viewProjMatrix.r[2]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_ViewProjMatrixRow3, viewProjMatrix.r[3]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_InvViewProjMatrixRow0, invViewProjMatrix.r[0]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_InvViewProjMatrixRow1, invViewProjMatrix.r[1]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_InvViewProjMatrixRow2, invViewProjMatrix.r[2]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_InvViewProjMatrixRow3, invViewProjMatrix.r[3]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_InvProjMatrixRow0, invProjMatrix.r[0]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_InvProjMatrixRow1, invProjMatrix.r[1]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_InvProjMatrixRow2, invProjMatrix.r[2]);
+    DirectX::XMStoreFloat4(&g_customBufferData.g_InvProjMatrixRow3, invProjMatrix.r[3]);
+    g_customBufferData.g_ViewDepthRange = depthRange;
     // Write shader settings directly into the struct arrays by bufferIndex.
     // This matches exactly what the HLSL #defines reference (modularFloats[N], etc.)
     for (auto* sv : g_shaderSettings.GetFloatShaderValues()) {
@@ -1394,6 +1559,15 @@ bool InstallGFXHooks_Internal() {
     swapChainVTable[8] = reinterpret_cast<void*>(MyPresent);
     VirtualProtect(&swapChainVTable[8], sizeof(void*), oldProtect, &oldProtect);
     REX::INFO("InstallGFXHooks_Internal: Present hook installed");
+    // Hook ID3D11DeviceContext::PSSetShaderResources (vtable index 8)
+    OriginalPSSetShaderResources = reinterpret_cast<PSSetShaderResources_t>(contextVTable[8]);
+    if (!VirtualProtect(&contextVTable[8], sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        REX::WARN("InstallGFXHooks_Internal: VirtualProtect failed for PSSetShaderResources");
+        return false;
+    }
+    contextVTable[8] = reinterpret_cast<void*>(MyPSSetShaderResources);
+    VirtualProtect(&contextVTable[8], sizeof(void*), oldProtect, &oldProtect);
+    REX::INFO("InstallGFXHooks_Internal: PSSetShaderResources hook installed");
     REX::INFO("InstallGFXHooks_Internal: All Hooks installed successfully");
     // Set up ImGui if DEVGUI_ON=true
     if (!DEVGUI_ON && !SHADERSETTINGS_ON) {

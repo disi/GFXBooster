@@ -28,6 +28,8 @@ extern std::filesystem::path g_pluginPath;
 extern bool DEBUGGING;
 // Custom buffer update flag
 extern bool CUSTOMBUFFER_ON;
+// Custom depth SRV slot in shader
+extern UINT DEPTHBUFFER_SLOT;
 // Custom resource view slot in shader
 extern UINT CUSTOMBUFFER_SLOT;
 // Shader settings menu flag
